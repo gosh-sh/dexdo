@@ -362,10 +362,7 @@ async fn fill_params_stores_a_three_part_name_whole() {
         .fill_params(ob, "boc")
         .await
         .unwrap();
-    assert_eq!(
-        stored_model_ref(&pool, ob).await.as_deref(),
-        Some("qwen--qwen2.5-32b--instruct")
-    );
+    assert_eq!(stored_model_ref(&pool, ob).await.as_deref(), Some("qwen--qwen2.5-32b--instruct"));
 }
 
 #[tokio::test]

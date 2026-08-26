@@ -145,9 +145,8 @@ fn build_inference_markets_request(req: &mut Request) -> Result<InferenceMarkets
         // the typed parse, so the conflict is always -1102, never -1130 or a
         // silent single-market success. (Intentionally stricter than
         // prediction's `build_markets_request`.)
-        let conflicting = ["status", "sort", "cursor", "limit"]
-            .iter()
-            .any(|&k| req.query::<String>(k).is_some());
+        let conflicting =
+            ["status", "sort", "cursor", "limit"].iter().any(|&k| req.query::<String>(k).is_some());
         if conflicting {
             return Err(ApiError::from(DomainError::MissingParameter));
         }
@@ -175,11 +174,7 @@ fn build_inference_markets_request(req: &mut Request) -> Result<InferenceMarkets
         .map(|v| v.clamp(1, INFERENCE_MAX_LIMIT as i64) as u16)
         .unwrap_or(INFERENCE_DEFAULT_LIMIT);
 
-    Ok(InferenceMarketsRequest::Listing(InferenceMarketsListing {
-        sort,
-        cursor,
-        limit,
-    }))
+    Ok(InferenceMarketsRequest::Listing(InferenceMarketsListing { sort, cursor, limit }))
 }
 
 fn inference_market_to_dto(m: InferenceMarket) -> InferenceMarketDto {

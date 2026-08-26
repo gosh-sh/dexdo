@@ -640,7 +640,10 @@ async fn commit_first_cycle(pool: &PgPool, tc: &str) {
     .await;
     project(
         &mut tx,
-        &ev("StreamStopped", serde_json::json!({"buyer":"0:buyer1","toSeller":"10","refundToBuyer":"4990"})),
+        &ev(
+            "StreamStopped",
+            serde_json::json!({"buyer":"0:buyer1","toSeller":"10","refundToBuyer":"4990"}),
+        ),
         &node(tc, "co-4"),
     )
     .await;
@@ -698,8 +701,16 @@ async fn a_second_funding_starts_a_new_cycle() {
     .await
     .unwrap();
 
-    assert_eq!(buyer.as_deref(), Some("0:buyer2"), "the new match's buyer must replace the old one");
-    assert_eq!(deposit.as_deref(), Some("7000"), "the new match's deposit must replace the old one");
+    assert_eq!(
+        buyer.as_deref(),
+        Some("0:buyer2"),
+        "the new match's buyer must replace the old one"
+    );
+    assert_eq!(
+        deposit.as_deref(),
+        Some("7000"),
+        "the new match's deposit must replace the old one"
+    );
     assert_eq!(ppt, None, "price_per_tick belongs to a cycle and is not known yet");
     assert_eq!(opened, None, "opened_at_chain must not carry over");
     assert_eq!(settled, None, "a live deal must not report a settlement");

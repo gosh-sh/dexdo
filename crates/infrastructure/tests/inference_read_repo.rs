@@ -396,10 +396,7 @@ async fn listing_paginates_null_chain_time_last() {
     // depend on that. When the window is short the property is unobservable, not
     // violated.
     if let Some(pos_d) = head.iter().position(|x| x == d) {
-        assert!(
-            pos_d > position_of(&head, c),
-            "a NULL chain time must sort after every dated row"
-        );
+        assert!(pos_d > position_of(&head, c), "a NULL chain time must sort after every dated row");
     }
 
     // And it renders with that coalesced timestamp rather than failing to decode.
