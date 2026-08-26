@@ -21,7 +21,6 @@ use dodex_domain::InferenceDepthSnapshot;
 use dodex_domain::InferenceMarket;
 use dodex_domain::InferenceMarketStatus;
 use dodex_domain::InferenceMarketsPage;
-use dodex_domain::InferenceModel;
 use dodex_domain::PriceLevel;
 use dodex_domain::Trade;
 use dodex_domain::INFERENCE_MAKER_REBATE_CAP_BPS;
@@ -45,9 +44,6 @@ struct InferenceMarketRow {
     orderbook_address: String,
     model_hash: Option<String>,
     model_ref: Option<String>,
-    producer: Option<String>,
-    model_name: Option<String>,
-    version: Option<String>,
     contract_version: Option<String>,
     platform_fee_bps: Option<i32>,
     price_precision: Option<i32>,
@@ -72,8 +68,8 @@ struct InferenceDepthLevelRow {
 // non-null `i64` (0) and the SELECT is the single source of the coalesce used
 // by ORDER BY / keyset / cursor — see the design doc §6.1 NULL handling.
 const INFERENCE_MARKET_COLUMNS: &str = r#"
-    id, orderbook_address, model_hash::text as model_hash, model_ref, producer,
-    model_name, model_version as version, version as contract_version, platform_fee_bps, price_precision, quantity_precision,
+    id, orderbook_address, model_hash::text as model_hash, model_ref,
+    version as contract_version, platform_fee_bps, price_precision, quantity_precision,
     tick_size, step_size, min_notional, reference_price::text as reference_price,
     coalesce(extract(epoch from created_at_chain)::bigint, 0) as created_at,
     coalesce((least(greatest(extract(epoch from created_at_chain), 0), 4102444800) * 1000000)::bigint, 0) as created_at_micros
@@ -121,16 +117,14 @@ impl PostgresReadModelRepository {
         let sql = format!(
             "select {INFERENCE_MARKET_COLUMNS} from inference_markets \
              where last_reconciled_at is not null \
-               and ($1::text is null or producer = $1) \
-               and ($2::bigint is null \
+               and ($1::bigint is null \
                     or (coalesce((least(greatest(extract(epoch from created_at_chain), 0), 4102444800) * 1000000)::bigint, 0), id) \
-                       < ($2, $3)) \
+                       < ($1, $2)) \
              order by coalesce((least(greatest(extract(epoch from created_at_chain), 0), 4102444800) * 1000000)::bigint, 0) desc, \
                       id desc \
-             limit $4"
+             limit $3"
         );
         let mut rows: Vec<InferenceMarketRow> = sqlx::query_as(&sql)
-            .bind(listing.filter.producer.clone())
             .bind(cursor_key)
             .bind(cursor_id)
             .bind(limit + 1)
@@ -239,7 +233,7 @@ fn assemble_inference_market(row: InferenceMarketRow) -> Result<InferenceMarket,
     let taker_commission = bps_to_decimal_string(fee_bps);
     let maker_commission = bps_to_decimal_string(-(INFERENCE_MAKER_REBATE_CAP_BPS as i32));
 
-    let model_ref = row
+    let model_ref_name = row
         .model_ref
         .filter(|s| !s.is_empty())
         .or_else(|| row.model_hash.filter(|s| !s.is_empty()))
@@ -269,12 +263,7 @@ fn assemble_inference_market(row: InferenceMarketRow) -> Result<InferenceMarket,
 
     Ok(InferenceMarket {
         orderbook_address: ob,
-        model: InferenceModel {
-            producer: row.producer,
-            name: row.model_name,
-            version: row.version,
-            model_ref,
-        },
+        model_ref_name,
         contract_version: row.contract_version,
         status: InferenceMarketStatus::Trading,
         quote_asset: "SHELL".to_string(),

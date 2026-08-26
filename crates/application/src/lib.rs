@@ -143,14 +143,11 @@ pub enum InferenceMarketsSort {
     CreatedAtDesc,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct InferenceMarketsFilter {
-    pub producer: Option<String>,
-}
-
+/// No filter field: the listing's only filter was `producer`, and it went with
+/// the parsed model-name parts it read. `status` has never been a predicate —
+/// TRADING is the only value — so what remains is sort, cursor and limit.
 #[derive(Debug, Clone)]
 pub struct InferenceMarketsListing {
-    pub filter: InferenceMarketsFilter,
     pub sort: InferenceMarketsSort,
     pub cursor: Option<String>,
     pub limit: u16,

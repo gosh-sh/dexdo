@@ -212,14 +212,6 @@ paths:
           type:
           - string
           - 'null'
-      - name: producer
-        in: query
-        description: Filter by model producer.
-        required: false
-        schema:
-          type:
-          - string
-          - 'null'
       - name: status
         in: query
         description: Comma-separated statuses to include. Currently only TRADING.
@@ -1456,7 +1448,7 @@ components:
       type: object
       required:
       - inferenceOrderBookAddress
-      - model
+      - modelRefName
       - status
       - quoteAsset
       - makerCommission
@@ -1473,9 +1465,8 @@ components:
           - string
           - 'null'
           description: |-
-            Version of the deployed order-book contract (e.g. `"4.0.30"`). Distinct
-            from `model.version` (the AI model's own version). `null` when not yet
-            known on chain.
+            Version of the deployed order-book CONTRACT (e.g. `"4.0.30"`), not of the
+            AI model. `null` when not yet known on chain.
         createdAt:
           type: integer
           format: int64
@@ -1486,8 +1477,11 @@ components:
           description: Signed decimal string; the seller rebate cap (negative).
         minNotional:
           type: string
-        model:
-          $ref: '#/components/schemas/InferenceModelDto'
+        modelRefName:
+          type: string
+          description: |-
+            The model's name as its order book reports it, verbatim — e.g.
+            `"Qwen2.5-32B-Instruct"` — or the model hash when the book has no name.
         pricePrecision:
           type: integer
           format: int32
@@ -1537,26 +1531,6 @@ components:
         serverTime:
           type: integer
           format: int64
-    InferenceModelDto:
-      type: object
-      required:
-      - ref
-      properties:
-        name:
-          type:
-          - string
-          - 'null'
-        producer:
-          type:
-          - string
-          - 'null'
-        ref:
-          type: string
-          description: Canonical `producer--name--version`, or the model hash when unknown.
-        version:
-          type:
-          - string
-          - 'null'
     InferenceOrderDto:
       type: object
       required:
@@ -2190,13 +2164,13 @@ components:
         metric:
           type: string
           description: Reference-price metric; currently always `WEEKLY_MEDIAN_PRICE`.
-        model:
+        modelRefName:
           type:
           - string
           - 'null'
           description: |-
-            Model ref (`producer--model--version`); `null` until the inference book
-            is reconciled (the market is not hidden on that account).
+            The model's name as its order book reports it, verbatim; `null` until the
+            inference book is reconciled (the market is not hidden on that account).
     TerminalDto:
       type: object
       description: |-

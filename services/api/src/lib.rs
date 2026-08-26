@@ -252,9 +252,9 @@ struct MarketDto {
 struct ResolvesFromDto {
     /// The `InferenceOrderBook` whose weekly-median price settles the outcome.
     inference_order_book_address: String,
-    /// Model ref (`producer--model--version`); `null` until the inference book
-    /// is reconciled (the market is not hidden on that account).
-    model: Option<String>,
+    /// The model's name as its order book reports it, verbatim; `null` until the
+    /// inference book is reconciled (the market is not hidden on that account).
+    model_ref_name: Option<String>,
     /// Reference-price metric; currently always `WEEKLY_MEDIAN_PRICE`.
     metric: String,
 }
@@ -921,7 +921,7 @@ fn market_to_dto(market: Market, max_batch_size: u16) -> MarketDto {
 fn resolves_from_to_dto(r: dodex_domain::ResolvesFrom) -> ResolvesFromDto {
     ResolvesFromDto {
         inference_order_book_address: r.inference_order_book_address,
-        model: r.model,
+        model_ref_name: r.model_ref_name,
         metric: match r.metric {
             dodex_domain::ResolvesFromMetric::WeeklyMedianPrice => {
                 "WEEKLY_MEDIAN_PRICE".to_string()
@@ -2725,13 +2725,13 @@ mod dto_tests {
             outcomes: vec![],
             resolves_from: Some(ResolvesFrom {
                 inference_order_book_address: "0:infbook".into(),
-                model: Some("qwen--qwen3--32b".into()),
+                model_ref_name: Some("qwen--qwen3--32b".into()),
                 metric: ResolvesFromMetric::WeeklyMedianPrice,
             }),
         };
         let v = serde_json::to_value(market_to_dto(market, 10)).unwrap();
         assert_eq!(v["resolvesFrom"]["inferenceOrderBookAddress"], "0:infbook");
-        assert_eq!(v["resolvesFrom"]["model"], "qwen--qwen3--32b");
+        assert_eq!(v["resolvesFrom"]["modelRefName"], "qwen--qwen3--32b");
         assert_eq!(v["resolvesFrom"]["metric"], "WEEKLY_MEDIAN_PRICE");
     }
 

@@ -183,10 +183,10 @@ pub enum ResolvesFromMetric {
 pub struct ResolvesFrom {
     /// The settling `InferenceOrderBook` address (= `oracle_events.range_ob_address`).
     pub inference_order_book_address: String,
-    /// The model ref (`producer--model--version`), falling back to the model
-    /// hash, then `None` when the inference book is not yet reconciled — the
-    /// market is not hidden on that account.
-    pub model: Option<String>,
+    /// The model name as the book reports it, falling back to the model hash,
+    /// then `None` when the inference book is not yet reconciled — the market is
+    /// not hidden on that account.
+    pub model_ref_name: Option<String>,
     pub metric: ResolvesFromMetric,
 }
 
@@ -259,18 +259,6 @@ pub struct DepthSnapshot {
     pub asks: Vec<PriceLevel>,
 }
 
-/// Model identity for an inference market. `model_ref` is the canonical
-/// `producer--name--version`, or the raw `model_hash` when the human-readable
-/// name is unknown. `producer` / `name` / `version` are populated only when
-/// `model_ref` parsed into exactly three `--`-separated parts.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InferenceModel {
-    pub producer: Option<String>,
-    pub name: Option<String>,
-    pub version: Option<String>,
-    pub model_ref: String,
-}
-
 /// Inference market phase. Reserved for future inactive states; clients
 /// treat it as opaque. Only `Trading` exists today.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -297,11 +285,18 @@ impl InferenceMarketStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InferenceMarket {
     pub orderbook_address: String,
-    pub model: InferenceModel,
+    /// The model name the book reports through `getModelName()`, verbatim, or
+    /// the raw `model_hash` when the name is unknown. Served as `modelRefName`.
+    ///
+    /// Not decomposed. It used to be split into `producer` / `name` / `version`
+    /// on exactly three `--`-separated parts, which the model registry's names
+    /// are not, so the parts were NULL more often than not and said nothing the
+    /// whole string does not.
+    pub model_ref_name: String,
     /// Version of the deployed order-book contract (`inference_markets.version`,
-    /// the book's `getVersion()` getter — e.g. `"4.0.30"`). Distinct from
-    /// `model.version`, which is the AI model's own version. `None` when the
-    /// contract version is not yet known on chain.
+    /// the book's `getVersion()` getter — e.g. `"4.0.30"`). This is the
+    /// CONTRACT's version, not the AI model's. `None` when the contract version
+    /// is not yet known on chain.
     pub contract_version: Option<String>,
     pub status: InferenceMarketStatus,
     pub quote_asset: String,

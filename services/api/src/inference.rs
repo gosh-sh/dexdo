@@ -9,7 +9,6 @@ use dodex_application::GetInferenceOrdersInput;
 use dodex_application::GetInferenceOrdersUseCase;
 use dodex_application::GetInferenceTradesQuery;
 use dodex_application::GetInferenceTradesUseCase;
-use dodex_application::InferenceMarketsFilter;
 use dodex_application::InferenceMarketsListing;
 use dodex_application::InferenceMarketsRequest;
 use dodex_application::InferenceMarketsSort;
@@ -52,10 +51,11 @@ struct InferenceMarketsResponse {
 struct InferenceMarketDto {
     #[serde(rename = "inferenceOrderBookAddress")]
     orderbook_address: String,
-    model: InferenceModelDto,
-    /// Version of the deployed order-book contract (e.g. `"4.0.30"`). Distinct
-    /// from `model.version` (the AI model's own version). `null` when not yet
-    /// known on chain.
+    /// The model's name as its order book reports it, verbatim — e.g.
+    /// `"Qwen2.5-32B-Instruct"` — or the model hash when the book has no name.
+    model_ref_name: String,
+    /// Version of the deployed order-book CONTRACT (e.g. `"4.0.30"`), not of the
+    /// AI model. `null` when not yet known on chain.
     contract_version: Option<String>,
     status: InferenceMarketStatusDto,
     quote_asset: String,
@@ -71,17 +71,6 @@ struct InferenceMarketDto {
     /// Weekly-median price per tick; `null` when the book has no recent liquidity.
     reference_price: Option<String>,
     created_at: i64,
-}
-
-#[derive(Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
-struct InferenceModelDto {
-    producer: Option<String>,
-    name: Option<String>,
-    version: Option<String>,
-    /// Canonical `producer--name--version`, or the model hash when unknown.
-    #[serde(rename = "ref")]
-    model_ref: String,
 }
 
 /// Reserved for future inactive states; clients treat it as opaque.
@@ -105,7 +94,6 @@ impl From<InferenceMarketStatus> for InferenceMarketStatusDto {
     summary = "List inference markets",
     parameters(
         ("inferenceOrderBookAddress" = Option<String>, Query, description = "Single-market lookup. Mutually exclusive with filters and pagination."),
-        ("producer" = Option<String>, Query, description = "Filter by model producer."),
         ("status" = Option<String>, Query, description = "Comma-separated statuses to include. Currently only TRADING."),
         ("sort" = Option<String>, Query, description = "Sort field. createdAt (default, DESC)."),
         ("cursor" = Option<String>, Query, description = "Opaque pagination cursor from a previous call."),
@@ -151,13 +139,13 @@ fn build_inference_markets_request(req: &mut Request) -> Result<InferenceMarkets
 
     if let Some(addr) = address {
         // Single-market lookup is mutually exclusive with ANY filter/pagination
-        // parameter — detected by raw PRESENCE (a present-but-blank `&limit=` or
-        // `&producer=` counts), per api-spec §6.1. Using raw `req.query` (not
+        // parameter — detected by raw PRESENCE (a present-but-blank `&limit=`
+        // counts), per api-spec §6.1. Using raw `req.query` (not
         // `non_empty_query`) means presence beats both the blank-collapse and
         // the typed parse, so the conflict is always -1102, never -1130 or a
         // silent single-market success. (Intentionally stricter than
         // prediction's `build_markets_request`.)
-        let conflicting = ["producer", "status", "sort", "cursor", "limit"]
+        let conflicting = ["status", "sort", "cursor", "limit"]
             .iter()
             .any(|&k| req.query::<String>(k).is_some());
         if conflicting {
@@ -169,7 +157,6 @@ fn build_inference_markets_request(req: &mut Request) -> Result<InferenceMarkets
     // Listing path. `status` is validated (TRADING-only) but not stored: every
     // visible row is TRADING, so the filter is a no-op on results. An unknown
     // token is -1130.
-    let producer = non_empty_query(req, "producer");
     let status = non_empty_query(req, "status");
     let sort_param = non_empty_query(req, "sort");
     let cursor = non_empty_query(req, "cursor");
@@ -189,7 +176,6 @@ fn build_inference_markets_request(req: &mut Request) -> Result<InferenceMarkets
         .unwrap_or(INFERENCE_DEFAULT_LIMIT);
 
     Ok(InferenceMarketsRequest::Listing(InferenceMarketsListing {
-        filter: InferenceMarketsFilter { producer },
         sort,
         cursor,
         limit,
@@ -199,12 +185,7 @@ fn build_inference_markets_request(req: &mut Request) -> Result<InferenceMarkets
 fn inference_market_to_dto(m: InferenceMarket) -> InferenceMarketDto {
     InferenceMarketDto {
         orderbook_address: m.orderbook_address,
-        model: InferenceModelDto {
-            producer: m.model.producer,
-            name: m.model.name,
-            version: m.model.version,
-            model_ref: m.model.model_ref,
-        },
+        model_ref_name: m.model_ref_name,
         contract_version: m.contract_version,
         status: m.status.into(),
         quote_asset: m.quote_asset,

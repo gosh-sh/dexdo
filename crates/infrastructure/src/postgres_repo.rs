@@ -2605,7 +2605,7 @@ fn assemble_market(
     validate_invariants(status, &timings, &terminal).map_err(|err| anyhow!(err))?;
     let resolves_from = oracle_block.range_ob_address.map(|ob| dodex_domain::ResolvesFrom {
         inference_order_book_address: ob,
-        model: oracle_block.range_model,
+        model_ref_name: oracle_block.range_model,
         metric: dodex_domain::ResolvesFromMetric::WeeklyMedianPrice,
     });
     let event = MarketEvent {
