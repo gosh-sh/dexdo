@@ -68,6 +68,16 @@ sigs() {
     done
 }
 
-diff <(sigs "$old_rev") <(sigs "$new_rev") | grep -E '^[<>]' || {
+# Captured, not piped straight into `||`. `diff` exits 1 when it finds
+# differences, and under `set -o pipefail` that 1 becomes the PIPELINE's status
+# even though `grep` succeeded — so an `|| { echo "no differences"; }` tail fired
+# on every run that had something to report, printing the all-clear directly
+# underneath the differences it had just listed. `|| true` keeps the empty case
+# (grep exits 1, nothing matched) from tripping `set -e`.
+changes="$(diff <(sigs "$old_rev") <(sigs "$new_rev") | grep -E '^[<>]' || true)"
+
+if [ -n "$changes" ]; then
+    printf '%s\n' "$changes"
+else
     echo "No function-signature differences between $old_rev and $new_rev"
-}
+fi
