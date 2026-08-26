@@ -50,12 +50,16 @@ registry + streaming events occupy the 700s (e.g. `StreamFunded=720`,
 `ProbeAccepted=728`); order-book events occupy `1000`–`1007`. The ABI event
 names differ from the `*Emit` constant names, so the typed decoders in the
 `*_events.rs` wrappers bind each id from the actual `emit … makeAddrExtern(<const>)`
-site. When retained rows are replayed, these events decode into `raw_events`
+site. These events decode into `raw_events`
 (`event_type = "TokenContract.<Event>"`, `src_address` = the TokenContract
 address) and project into the SETTLEMENT read-model: `inference_deals` (one row
-per TokenContract / deal) and `inference_ticks` (one row per finalized tick).
-The current live indexer does not capture new TokenContract event rows. The
-deal's `orderbook_address`,
+per TokenContract / deal) and `inference_ticks` (one row per finalized tick of
+the deal's current funding cycle). The indexer captures them live as of
+contracts 4.0.36, which deploys the deal from the seller's `PrivateNote` and so
+puts it in the DEX dApp; before that they arrived only as retained rows replayed
+during a rebuild. A deal address serves more than one match now — see
+[indexer.md § Deal-address reuse](../tech-specs/indexer.md#deal-address-reuse).
+The deal's `orderbook_address`,
 `seller_note`, and `buyer_note` are linked from `InferenceOrderBook.InferenceFilled`
 (`sellerTC` + `buyerNote` + the SELL leg's note); per-tick rows and the
 `finalized_ticks` aggregate comes from `TickFinalized` (per-tick `finalized_owed` is stored on each `inference_ticks` row — it is the contract's cumulative `_finalizedOwed`, not a per-tick delta);

@@ -80,7 +80,7 @@ blockchain {
 
 The account id is `RootPn::DEFAULT_ADDRESS` without its `0:` workchain prefix. The account-events query deliberately has no `dst` argument; local routing filters run after this server-side source selection and before ABI decode. A protected gateway may use optional `graphql.bearer_token`; the indexer sends it as `Authorization: Bearer ...` on both GraphQL queries.
 
-These are the only live capture queries. In particular, the indexer does not issue one query per OrderBook event route or per-deal `TokenContract`: OrderBook traffic is covered by the DEX dApp stream, and the legacy RootPN traffic is covered by its fixed account address. If a TokenContract edge is nevertheless present in a source page, the local `dst` allow-list drops it before decode.
+These are the only live capture queries. In particular, the indexer does not issue one query per OrderBook event route or per-deal `TokenContract`: OrderBook traffic is covered by the DEX dApp stream, and the legacy RootPN traffic is covered by its fixed account address. Since contracts 4.0.36 a deal is deployed by its seller's `PrivateNote` (`deployDeal`) rather than by an external message, so it lives in the note's dApp — the DEX one — and its events arrive on the DEX dApp stream with everything else. No per-deal query is needed to reach them, and none is issued.
 
 ### Pre-decode filters
 
@@ -90,15 +90,17 @@ Only the first **selects**; the other two subtract. That asymmetry is the point 
 
 #### Ingest scope: emitted-event `dst` (not configurable)
 
-After the gateway has selected the DEX dApp or RootPN source, capture keeps an edge only when its `dst` is one of the 69 routing destinations in `config::SCOPED_EVENT_IDS`. Every `TokenContract.*` destination is deliberately excluded, so per-deal settlement events are dropped before decode and never written to `raw_events`. Everything else outside the allow-list is also dropped before decode and counted as `out_of_scope`. `dst` is a 1:1 discriminator of event type readable from the message header, so this costs no decode.
+After the gateway has selected the DEX dApp or RootPN source, capture keeps an edge only when its `dst` is one of the 84 routing destinations in `config::SCOPED_EVENT_IDS`. Everything outside the allow-list is dropped before decode and counted as `out_of_scope`. `dst` is a 1:1 discriminator of event type readable from the message header, so this costs no decode.
+
+The 15 `TokenContract.*` settlement destinations (the 7xx block) are **in** the list as of contracts 4.0.36. They were excluded before it, and the exclusion cost nothing while it held: a deal was deployed by an external message and was therefore the root of its own dApp, so its events could not appear on the DEX dApp stream at all. Once the deal moved into the note's dApp, keeping the exclusion would have meant dropping — every tick, from a stream already being drained — exactly the events [`inference_deals`](data-schema.md#inference_deals) and [`inference_ticks`](data-schema.md#inference_ticks) are built from. Note that the deal's `ContractDeployed` routes to **732** (`DealDeployedEmit`), not to 703: it carries the same name and body as `RootModel.ContractDeployed` and shared its channel until contracts 4.0.35 split the two.
 
 An edge with **no** `dst` is dropped too — every event we emit is routed to one — but counted separately as `dst_missing`, and any nonzero count emits a `warn!`.
 
 This filter is unconditional and has no config key. Server-side source selection prevents the global-chain scan; the local `dst` allow-list prevents unrelated DEX-dApp or RootPN outbound messages from reaching decode or storage.
 
-The id list is pinned by `crates/infrastructure/tests/ingest_scope.rs`, which re-derives it from the indexed `makeAddrExtern` call sites under `contracts/**` on every run and separately asserts that all TokenContract call sites remain excluded. It cannot be derived from the ABI bundle: the ABI carries the event's *signature-hash* id, which is a different number from the EVENT_ID constant that forms the `dst`.
+The id list is pinned by `crates/infrastructure/tests/ingest_scope.rs`, which re-derives it from every `makeAddrExtern` call site under `contracts/**` on every run, and separately asserts the `TokenContract` block as a group. It cannot be derived from the ABI bundle: the ABI carries the event's *signature-hash* id, which is a different number from the EVENT_ID constant that forms the `dst`.
 
-The list is load-bearing in both directions. An indexed id missing from it is lost before `raw_events` and is **not** recoverable by reprojection; a stale id admits a route the indexer does not intend to store. The pinning test fails on either, while the explicit TokenContract exclusion test prevents those 15 routes from being added accidentally.
+The list is load-bearing in both directions. An indexed id missing from it is lost before `raw_events` and is **not** recoverable by reprojection; a stale id admits a route the indexer does not intend to store. The pinning test fails on either. The separate TokenContract test names those 15 routes as a group because their presence is a decision rather than a consequence: put the deal back outside the DEX dApp and it is the test that says what has to be reconsidered.
 
 #### No-op filter: `indexer.ignored_event_types`
 
@@ -275,27 +277,41 @@ The inference reconciler closes this gap: it sweeps the book's `OPEN` rows with 
 
 ## Projection — TokenContract SETTLEMENT events
 
-The handlers in this section apply only when `TokenContract.*` rows already exist in `raw_events` (for example, rows retained from the earlier global capture design and replayed during a rebuild). The current two-stream live capture excludes every TokenContract `dst` before decode, so it does not ingest new `TokenContract.*` events. Public inference endpoints continue to derive their order and trade data from `InferenceOrderBook.*`; they do not depend on settlement-event capture.
+These handlers run on live traffic as of contracts 4.0.36. Until then they applied only to retained rows — the deal lived in a dApp of its own and its events never reached capture — and the section described a replay-only path; see [Ingest scope](#ingest-scope-emitted-event-dst-not-configurable) for what changed. Public inference endpoints still derive their order and trade data from `InferenceOrderBook.*` and do not depend on settlement-event capture.
 
-For retained rows, `TokenContract.*` events drive [`inference_deals`](data-schema.md#inference_deals) and [`inference_ticks`](data-schema.md#inference_ticks) — the per-deal read model for the inference SETTLEMENT phase. A `TokenContract` is deployed per matched SELL offer; its address is the PK for `inference_deals`.
+`TokenContract.*` events drive [`inference_deals`](data-schema.md#inference_deals) and [`inference_ticks`](data-schema.md#inference_ticks) — the per-deal read model for the inference SETTLEMENT phase. A `TokenContract` is deployed per matched SELL offer; its address is the PK for `inference_deals`.
 
-The projector seeds a skeleton `inference_deals` row on the **first** `TokenContract.*` event it sees for a given address (keyed by `src_address = event.src`), so out-of-order or early delivery still records the deal. The `orderbook_address`, `seller_note`, and `buyer_note` cross-link columns are filled by the `InferenceOrderBook.InferenceFilled` handler (see the table above) — it is the only event carrying `sellerTC` + `buyerNote` together; the SETTLEMENT projector does not touch those columns. Both sides use `coalesce`-guarded upserts so whichever event arrives first preserves the other side's contribution.
+The projector seeds a skeleton `inference_deals` row on the **first** `TokenContract.*` event it sees for a given address (keyed by `src_address = event.src`), so out-of-order or early delivery still records the deal. That seed is a write, which is why no `TokenContract.*` type may be added to `IGNORABLE_EVENT_TYPES`: that list admits only genuine projector no-ops, and every event here goes through the seed.
+
+The `orderbook_address` and `seller_note` cross-link columns are filled by the `InferenceOrderBook.InferenceFilled` handler (see the table above) — it is the only event carrying `sellerTC` + `buyerNote` together — and the SETTLEMENT projector never touches them. `buyer_note` is written by both sides.
+
+### Deal-address reuse
+
+**A deal address serves more than one match as of contracts 4.0.36**, and the read model is keyed by that address. `cleanupUnopened` used to end in `_die`, so a buyer no-show destroyed the `TokenContract` and the next match needed a fresh deploy at a fresh address. It no longer does: it returns the deal to unfunded and the same contract takes a new offer through `postFromNote`, with a different buyer and a different deposit.
+
+`StreamFunded` is therefore the cycle boundary. When one arrives whose `msg_chain_order` is **newer** than the row's `last_chain_order`, and the row was already funded once, the projector clears everything that belongs to a cycle — `buyer_note`, `deposit`, `funded_at_chain`, `price_per_tick`, `opened_at_chain`, `settled_at_chain`, `close_kind`, `clean_settlement`, `disputed_at_chain`, `trusted_ticks`, `claimed_ticks`, `finalized_ticks` back to 0 — and deletes the deal's `inference_ticks` rows, so the counter and the log it counts stay in agreement. `orderbook_address` and `seller_note` survive: the deal address derives from the seller's key and nonce, so neither can change while the address does not.
+
+The `last_chain_order` guard is what makes this replay-safe. Reprojection replays rows, and a blind reset would erase live state; gated, a replay of cycle one's `StreamFunded` after cycle two has begun is inert. The first funding of a deal has no cycle to clear and skips the reset outright.
+
+`InferenceOrderBook.InferenceFilled` writes `buyer_note` under the same rule — newest `last_chain_order` wins rather than first-write-wins — so the party recorded against a deal is the one from its current match.
+
+One gap is left open deliberately: this orders cycles, not events within one. A cycle-one event delivered out of order *after* cycle two's funding still writes into cycle two through its own `coalesce`. Closing it needs a cycle number on the deal row and on every event that touches one — a migration and a wider primary key, against a case that has not been observed.
 
 | Event | Effect |
 | --- | --- |
 | `ContractDeployed` | Seeds the `inference_deals` skeleton only; no additional columns. |
-| `StreamFunded` | Sets `buyer_note` (first-write-wins), `deposit` (first-write-wins), `funded_at_chain` (first-write-wins). |
+| `StreamFunded` | Cycle boundary — see [Deal-address reuse](#deal-address-reuse). On a funding newer than `last_chain_order` for an already-funded row, clears the per-cycle columns and the deal's `inference_ticks` rows first. Then sets `buyer_note`, `deposit`, `funded_at_chain` (first-write-wins into the cleared row) and advances `last_chain_order`. |
 | `StreamOpened` | Sets `buyer_note` (first-write-wins), `price_per_tick` (first-write-wins), `opened_at_chain` (first-write-wins). |
 | `TickFinalized` | Inserts one `inference_ticks` row keyed by `(token_contract_address, chain_order)` — idempotent on replay via `ON CONFLICT DO NOTHING`. Increments `finalized_ticks` on `inference_deals` **only** when the insert was a real insert (rows affected = 1), so `finalized_ticks` = count of `TickFinalized` events and replay does not double-count. The event's `finalizedOwed` is the contract's cumulative `_finalizedOwed`; it is stored on the tick row, not summed. |
 | `StreamStopped` | Sets `settled_at_chain` (first-write-wins), `close_kind = 'STOPPED'`, `clean_settlement = true` (first-write-wins). |
 | `DisputeResolved` | Sets `settled_at_chain` (first-write-wins), `close_kind = 'DISPUTE_RESOLVED'`, `clean_settlement = false` (first-write-wins). |
-| `StreamReclaimed` | Sets `settled_at_chain` (first-write-wins), `close_kind = 'RECLAIMED'`, `clean_settlement = false` (first-write-wins). |
+| `StreamReclaimed` | Sets `settled_at_chain` (first-write-wins), `close_kind = 'RECLAIMED'`, `clean_settlement = false` (first-write-wins). The contract no longer emits it — the event went with `reclaimOnTimeout` — so the arm serves retained rows only. |
 | `StreamDisputed` | Sets `disputed_at_chain` (first-write-wins), `clean_settlement = false`. |
 | `ContractDestroyed` | Sets `settled_at_chain` (first-write-wins), `close_kind = 'DESTROYED'`. |
 | `ProbeBurned` | Terminal close (buyer stop before probe-accept, or dispute-burn): sets `close_kind = 'PROBE_BURNED'` + `settled_at_chain` (first-write-wins). Does NOT set `clean_settlement` (stays NULL → not a clean settlement, no settlement-complete reward). |
-| `SellerBondFunded` / `ProbeAccepted` / `ShellWithdrawn` | No-op beyond skeleton seed — these carry no deal-level state the SETTLEMENT read-model needs. |
+| `SellerBondFunded` / `BuyerBondFunded` / `ProbeAccepted` / `ShellWithdrawn` / `EndpointSet` | No-op beyond skeleton seed — these carry no deal-level state the SETTLEMENT read-model needs. `EndpointSet` carries the buyer's endpoint as ciphertext only the two parties can read, so there is nothing in it a read model could serve. |
 
-The projector never returns `Deferred`; the skeleton seed ensures the row always exists before the event-specific handler runs. All close columns use `coalesce(existing, new)` first-write-wins so late or replayed close events cannot overwrite an already-settled row.
+The projector never returns `Deferred`; the skeleton seed ensures the row always exists before the event-specific handler runs. All close columns use `coalesce(existing, new)` first-write-wins so late or replayed close events cannot overwrite an already-settled row — first-write-wins *within a cycle*, which the `StreamFunded` reset above starts.
 
 **Read-model contract intended for the forthcoming rewards service.** Given a deal's `TokenContract` address, a single query — `SELECT orderbook_address, seller_note, buyer_note, finalized_ticks, clean_settlement, settled_at_chain FROM inference_deals WHERE token_contract_address = $1` — resolves the originating order book, both parties, and the tick/settlement outcome without replaying raw events. `inference_ticks` provides per-tick granularity (one row per finalized tick) for tick-level scoring such as "Tick выдан / Tick потрачен".
 

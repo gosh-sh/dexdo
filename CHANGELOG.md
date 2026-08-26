@@ -2,6 +2,25 @@
 
 All notable changes to DEX.DO are recorded here. Entries are date-based, newest first.
 
+## [2026-08-26]
+
+### Breaking Changes
+
+- **A deal is deployed from the seller's note now, not by an external message** (contracts 4.0.36). `PrivateNote.deployDeal(nonce, modelName, modelHash, pricePerTick, maxTicks, gasReserve)` replaces the off-chain `TokenContract` deploy. The constructor takes a new `depositIdentifierHash` argument and requires `msg.sender` to be the canonical `PrivateNote` for it, so a seller-key-signed external deploy is refused outright. The deal therefore lives in the note's dApp instead of one of its own, and `PrivateNote`'s constructor takes a new `tokenContractCode` cell. Re-pinned code hashes: `PrivateNote → f7a49601`, `TokenContract → 4378e271` (depth 17 → 18), `RootModel → 87c63e32`, `InferenceOrderBook → 91f0af87`.
+- **`RootPN.setTokenContractCode` must run before any note is deployed.** A note minted without it bakes an empty TokenContract code cell, and its `deployDeal` puts a codeless account at a well-formed address. `RootPN.onCodeUpgrade` restores six codes, so every `updateCode` wipes `_inferenceOrderBookCode`, `_tokenContractCode` and the previous-generation note pin: re-run `setInferenceOrderBookCode`, `setTokenContractCode` and `setPrevPrivateNoteCode` after each upgrade.
+- **A BUY order now costs the note 0.025 SHELL**, burned as ECC[2] at placement (`PrivateNote.placeInferenceBuy`), mirroring what posting a SELL offer already cost the seller. Taken from the note's own SHELL, not from its recorded balance, so a note holding none cannot place a buy.
+
+### Added
+
+- `RootPN.setPrevPrivateNoteCode` / `getPrevPrivateNoteCode`: the root serves notes of one previous code generation, so a `PrivateNote` upgrade no longer strands the balances of notes already deployed — `withdrawTokens` accepts a note of either generation.
+- The indexer ingests the 15 `TokenContract.*` settlement routes (external ids 709, 710, 720–725, 727–733). [`inference_deals`](docs/tech-specs/data-schema.md#inference_deals) and [`inference_ticks`](docs/tech-specs/data-schema.md#inference_ticks) are populated from live capture instead of only from retained rows. No config change is needed; expect more `raw_events` volume wherever inference deals are active, since a deal emits ten-plus events per match plus one per claimed tick.
+
+### Changed
+
+- [`inference_deals`](docs/tech-specs/data-schema.md#inference_deals) describes a deal's **current** match, not its whole history. `cleanupUnopened` no longer destroys the deal on a buyer no-show, so one `TokenContract` address serves several matches: `TokenContract.StreamFunded` now resets the per-cycle columns (`buyer_note`, `deposit`, `funded_at_chain`, `price_per_tick`, `opened_at_chain`, `settled_at_chain`, `close_kind`, `clean_settlement`, `disputed_at_chain`, `trusted_ticks`, `claimed_ticks`, `finalized_ticks`) and deletes the deal's `inference_ticks` rows, and `buyer_note` is newest-wins rather than first-write-wins. `orderbook_address` and `seller_note` are unchanged by a new cycle. The history of matches is [`inference_trades`](docs/tech-specs/data-schema.md#inference_trades).
+- A deal's gas is an ECC[2] reserve that each entrypoint burns a measured charge from, instead of a one-time native deposit sized by a published formula. `fundDeal`, `fundBuyerBond` and `fundDeployShell` send under flag 1 rather than 17, so the value stays SHELL instead of converting to native on arrival; a buyer's calls into a deal carry their own charge on the message.
+- `RootPN.withdrawTokens` is gated on the sender being a note of either code generation (was: the current generation only). Parameters are unchanged.
+
 ## [2026-07-25]
 
 ### Changed

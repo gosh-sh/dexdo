@@ -443,7 +443,9 @@ The inference settlement side can track the lifecycle of each deal escrow (`Toke
 
 ### `inference_deals`
 
-One row per `TokenContract` address. `InferenceOrderBook.InferenceFilled` from the live DEX dApp stream creates or enriches the deal cross-link. If retained `TokenContract.*` rows are replayed, the first one seeds a skeleton keyed by `src_address`, and the SETTLEMENT projector fills the corresponding settlement columns.
+One row per `TokenContract` address. `InferenceOrderBook.InferenceFilled` creates or enriches the deal cross-link; the first `TokenContract.*` event seeds a skeleton keyed by `src_address`, and the SETTLEMENT projector fills the settlement columns. Both arrive on the live DEX dApp stream as of contracts 4.0.36 — before it, the `TokenContract.*` half was replay-only.
+
+**One row per address, not per match.** Since 4.0.36 a buyer no-show (`cleanupUnopened`) returns the deal to the book instead of destroying it, so the same address can be funded again by a different buyer. `TokenContract.StreamFunded` is the cycle boundary: a funding newer than `last_chain_order` on an already-funded row clears every per-cycle column below and deletes the deal's `inference_ticks` rows; `orderbook_address` and `seller_note` survive, because the address derives from the seller's key and nonce. `buyer_note` is newest-wins for the same reason. The columns therefore describe the deal's **current** match — the history of matches is [`inference_trades`](#inference_trades). See [indexer.md § Deal-address reuse](indexer.md#deal-address-reuse).
 
 | Column | Type | Notes |
 | --- | --- | --- |
@@ -475,7 +477,7 @@ Indices:
 
 ### `inference_ticks`
 
-One row per finalized tick within a deal. Written by the SETTLEMENT projector when a retained `TokenContract.TickFinalized` row is replayed. The composite PK `(token_contract_address, chain_order)` is idempotent against redelivery. Current live capture does not add these rows.
+One row per finalized tick within a deal's **current** funding cycle. Written by the SETTLEMENT projector on `TokenContract.TickFinalized`, which live capture ingests as of contracts 4.0.36. The composite PK `(token_contract_address, chain_order)` is idempotent against redelivery. A new funding cycle on the same deal address deletes the rows of the previous one, in the same statement that resets `inference_deals.finalized_ticks` — the counter and this log are one fact and must not drift apart.
 
 | Column | Type | Notes |
 | --- | --- | --- |
