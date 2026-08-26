@@ -47,7 +47,7 @@ Seeded values: `(1, NACKL, 9, ...)`, `(2, SHELL, 9, ...)`, `(3, USDC, 6, ...)`. 
 
 ### `raw_events`
 
-The append-only event log. Every **in-scope** message edge from either filtered GraphQL stream lands here, decoded or not, before any projector runs. The gateway first selects the DEX `src_dapp_id` or legacy RootPN source; the indexer then keeps only the indexed `dst` allow-list, which explicitly excludes every `TokenContract.*` route. See [Server-side capture scope](indexer.md#server-side-capture-scope) and [Ingest scope](indexer.md#ingest-scope-emitted-event-dst-not-configurable). It is the recovery boundary for the read-model: reprojection replays decoded but unprojected rows here, and downstream tables can always be rebuilt from this one plus a clean schema.
+The append-only event log. Every **in-scope** message edge from either filtered GraphQL stream lands here, decoded or not, before any projector runs. The gateway first selects the DEX `src_dapp_id` or legacy RootPN source; the indexer then keeps only the indexed `dst` allow-list, which includes the `TokenContract.*` settlement routes as of contracts 4.0.36. See [Server-side capture scope](indexer.md#server-side-capture-scope) and [Ingest scope](indexer.md#ingest-scope-emitted-event-dst-not-configurable). It is the recovery boundary for the read-model: reprojection replays decoded but unprojected rows here, and downstream tables can always be rebuilt from this one plus a clean schema.
 
 | Column | Type | Notes |
 | --- | --- | --- |
@@ -439,7 +439,7 @@ Recovery notes for on-call:
 
 ## Read-model — inference deals
 
-The inference settlement side can track the lifecycle of each deal escrow (`TokenContract` — a per-deal streaming-payment contract auto-deployed when a SELL offer is matched) and the individual finalized ticks within it. The SETTLEMENT projector still replays `TokenContract.*` rows already retained in `raw_events`, but the current two-stream live capture excludes every TokenContract `dst` before decode and therefore does not add new settlement-event rows. These tables are not used by the current public inference endpoints.
+The inference settlement side tracks the lifecycle of each deal escrow (`TokenContract` — a per-deal streaming-payment contract, deployed by the seller's `PrivateNote` when it offers and matched against a BUY) and the individual finalized ticks within it. Live capture fills these tables as of contracts 4.0.36, which moved the deal into the DEX dApp; before it the SETTLEMENT projector only replayed rows retained in `raw_events`. They are not used by the current public inference endpoints.
 
 ### `inference_deals`
 

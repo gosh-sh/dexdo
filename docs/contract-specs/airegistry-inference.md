@@ -38,9 +38,9 @@ feature (`deploy_inference_order_book`, `post_sell_offer`, `place_inference_buy`
 write-side SDK support stays behind the `test-helpers` feature flag and out of
 the production binary. The indexer captures `InferenceOrderBook.*` through the
 DEX dApp stream and projects the public inference order/trade read-model.
-`TokenContract.*` handlers remain replay-compatible for rows retained from the
-former global capture, but current live capture excludes every TokenContract
-event route before decode. See
+`TokenContract.*` handlers run on live traffic as of contracts 4.0.36, which put
+the deal in the note's dApp; they stay replay-compatible for rows retained from
+the former global capture. See
 [docs/tech-specs/indexer.md](../tech-specs/indexer.md).
 
 ## Event ids
