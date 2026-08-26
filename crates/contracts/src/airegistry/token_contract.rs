@@ -427,6 +427,12 @@ impl TokenContract {
     }
 
     /// Original contract method: `getShellBalance`.
+    ///
+    /// This is the deal's `_balance` LEDGER — the escrow it holds for the deal —
+    /// not the physical ECC[2] on the account. The two used to be the same
+    /// thing and are not since 4.0.33: the account's ECC is the gas reserve
+    /// every entrypoint burns from, and it is read off the account record, not
+    /// through this getter.
     pub async fn get_shell_balance(&self) -> KitResult<ResultOfGetShellBalance> {
         self.call_get_method::<ResultOfGetShellBalance>("getShellBalance").await
     }

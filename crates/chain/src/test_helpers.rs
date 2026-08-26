@@ -39,6 +39,7 @@ use dodex_contracts::dex::pmp::Pmp;
 use dodex_contracts::dex::pmp::ResultOfGetDetails as PmpKitDetails;
 use dodex_contracts::dex::private_note::ParamsOfCancelAllInferenceOrders;
 use dodex_contracts::dex::private_note::ParamsOfCancelInferenceOrder;
+use dodex_contracts::dex::private_note::ParamsOfDeployDeal;
 use dodex_contracts::dex::private_note::ParamsOfDeployInferenceOrderBook;
 use dodex_contracts::dex::private_note::ParamsOfDeployPmp;
 use dodex_contracts::dex::private_note::ParamsOfFundDeployShell;
@@ -107,8 +108,12 @@ pub struct AccountShell {
     /// chain's own ledger, not a contract field — distinct from a note's
     /// internal `_balance`, which only tracks what the note minted for itself.
     pub shell: u128,
-    /// Native balance, in nanovmshell. Where a `flag: 16` credit ends up.
+    /// Native balance, in nanovmshell.
     pub native: u128,
+    /// The account's code hash, or `None` if it carries no state. The one
+    /// observable that separates "deployed with an empty code cell" from
+    /// "never deployed" and from "running a different build".
+    pub code_hash: Option<String>,
 }
 
 impl Dex {
@@ -312,6 +317,23 @@ impl Dex {
             .map_err(Into::into)
     }
 
+    /// Seller note deploys its own canonical deal `TokenContract`
+    /// (`PrivateNote.deployDeal`).
+    ///
+    /// The deal lands in the note's dApp, so every `token_contract_*` helper
+    /// below addresses it as an ordinary DEX contract.
+    pub async fn deploy_deal(
+        &self,
+        pn_address: &str,
+        params: ParamsOfDeployDeal,
+        signer: Signer,
+    ) -> ChainResult<ResultOfSendMessage> {
+        PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address))
+            .deploy_deal(params, signer)
+            .await
+            .map_err(Into::into)
+    }
+
     pub async fn post_sell_offer(
         &self,
         pn_address: &str,
@@ -500,6 +522,11 @@ impl Dex {
     }
 
     // ── TokenContract (streaming-deal settlement) ─────────────────────
+    //
+    // Addressed in the DEX dApp, like a note. Contracts 4.0.36 moved the deal
+    // there by having the seller's note deploy it (`deploy_deal` above);
+    // before that it was created by an external message and was the root of its
+    // own dApp, which is what `self_rooted_contract_params` existed for here.
 
     /// Seller opens the stream and freezes the probe tick
     /// (`TokenContract.open`).
@@ -509,7 +536,7 @@ impl Dex {
         params: ParamsOfOpen,
         signer: Signer,
     ) -> ChainResult<ResultOfSendMessage> {
-        TokenContract::new(self.ctx.clone(), self_rooted_contract_params(token_contract_address))
+        TokenContract::new(self.ctx.clone(), dex_contract_params(token_contract_address))
             .open(params, signer)
             .await
             .map_err(Into::into)
@@ -522,7 +549,7 @@ impl Dex {
         token_contract_address: &str,
         signer: Signer,
     ) -> ChainResult<ResultOfSendMessage> {
-        TokenContract::new(self.ctx.clone(), self_rooted_contract_params(token_contract_address))
+        TokenContract::new(self.ctx.clone(), dex_contract_params(token_contract_address))
             .resolve_dispute_timeout(signer)
             .await
             .map_err(Into::into)
@@ -535,7 +562,7 @@ impl Dex {
         params: ParamsOfWithdrawShell,
         signer: Signer,
     ) -> ChainResult<ResultOfSendMessage> {
-        TokenContract::new(self.ctx.clone(), self_rooted_contract_params(token_contract_address))
+        TokenContract::new(self.ctx.clone(), dex_contract_params(token_contract_address))
             .withdraw_shell(params, signer)
             .await
             .map_err(Into::into)
@@ -545,7 +572,7 @@ impl Dex {
         &self,
         token_contract_address: &str,
     ) -> ChainResult<TcState> {
-        TokenContract::new(self.ctx.clone(), self_rooted_contract_params(token_contract_address))
+        TokenContract::new(self.ctx.clone(), dex_contract_params(token_contract_address))
             .get_state()
             .await
             .map_err(Into::into)
@@ -555,7 +582,7 @@ impl Dex {
         &self,
         token_contract_address: &str,
     ) -> ChainResult<TcSellerBond> {
-        TokenContract::new(self.ctx.clone(), self_rooted_contract_params(token_contract_address))
+        TokenContract::new(self.ctx.clone(), dex_contract_params(token_contract_address))
             .get_seller_bond()
             .await
             .map_err(Into::into)
@@ -568,7 +595,7 @@ impl Dex {
         &self,
         token_contract_address: &str,
     ) -> ChainResult<TcFees> {
-        TokenContract::new(self.ctx.clone(), self_rooted_contract_params(token_contract_address))
+        TokenContract::new(self.ctx.clone(), dex_contract_params(token_contract_address))
             .get_fees()
             .await
             .map_err(Into::into)
@@ -578,7 +605,7 @@ impl Dex {
         &self,
         token_contract_address: &str,
     ) -> ChainResult<TcOffer> {
-        TokenContract::new(self.ctx.clone(), self_rooted_contract_params(token_contract_address))
+        TokenContract::new(self.ctx.clone(), dex_contract_params(token_contract_address))
             .get_offer()
             .await
             .map_err(Into::into)
@@ -588,32 +615,35 @@ impl Dex {
         &self,
         token_contract_address: &str,
     ) -> ChainResult<TcParties> {
-        TokenContract::new(self.ctx.clone(), self_rooted_contract_params(token_contract_address))
+        TokenContract::new(self.ctx.clone(), dex_contract_params(token_contract_address))
             .get_parties()
             .await
             .map_err(Into::into)
     }
 
+    /// The deal's escrow LEDGER (`_balance`), not the ECC on its account. The
+    /// gas reserve lives in the latter — read it with [`Self::dex_account_shell`].
     pub async fn token_contract_get_shell_balance(
         &self,
         token_contract_address: &str,
     ) -> ChainResult<u128> {
-        TokenContract::new(self.ctx.clone(), self_rooted_contract_params(token_contract_address))
+        TokenContract::new(self.ctx.clone(), dex_contract_params(token_contract_address))
             .get_shell_balance()
             .await
             .map(|r| r.value)
             .map_err(Into::into)
     }
 
-    /// The per-deal windows the `TokenContract` computed for itself from its
-    /// tick price. `settle_window` and `stream_timeout` are NOT constants —
-    /// they scale with the price — so a test that has to outwait one must read
-    /// it here rather than hardcode the value its own price happens to give.
+    /// The deal's protocol constants: the platform fee and the two bounds on
+    /// how fast a seller may claim (`min_claim_interval` between claims,
+    /// `min_seconds_per_tick` on how much output the elapsed time justifies),
+    /// plus the dispute window. A test that has to outwait one must read it
+    /// here rather than hardcode a figure.
     pub async fn token_contract_get_config(
         &self,
         token_contract_address: &str,
     ) -> ChainResult<TcConfig> {
-        TokenContract::new(self.ctx.clone(), self_rooted_contract_params(token_contract_address))
+        TokenContract::new(self.ctx.clone(), dex_contract_params(token_contract_address))
             .get_config()
             .await
             .map_err(Into::into)
@@ -621,8 +651,10 @@ impl Dex {
 
     // ── Raw account reads ─────────────────────────────────────────────
 
-    /// Physical SHELL on a contract that is the root of its own dApp — the
-    /// airegistry ones — reachable before any code lands there.
+    /// Physical SHELL on a contract that is the root of its own dApp, reachable
+    /// before any code lands there. That is now only the force-placed registry
+    /// roots (`SuperRoot`, `ModelRegistry`): a deal is deployed by its note and
+    /// lives in the DEX dApp, so read it with [`Self::dex_account_shell`].
     pub async fn self_rooted_account_shell(&self, address: &str) -> ChainResult<AccountShell> {
         self.read_account_shell(self_rooted_contract_params(address)).await
     }
@@ -655,6 +687,7 @@ impl Dex {
                 .as_ref()
                 .and_then(|v| v.to_string().parse::<u128>().ok())
                 .unwrap_or(0),
+            code_hash: account.code_hash.clone(),
         })
     }
 }
