@@ -956,8 +956,8 @@ mod tests {
     /// passing as clean.
     #[test]
     fn sweep_lists_cover_private_note_abi_fields() {
-        // Closed against the ground-truth ABI on this branch: 53 fields =
-        // 24 must-be-empty-or-zero + 4 must-be-false + 25 allowed. This ABI
+        // Closed against the ground-truth ABI on this branch: 54 fields =
+        // 24 must-be-empty-or-zero + 4 must-be-false + 26 allowed. This ABI
         // has no `_timestamp` field; instead it carries `messages` /
         // `lastMessage` — gosh replay-protection state that mutates during
         // operations but does not block reuse.
@@ -973,6 +973,11 @@ mod tests {
             "_privateNoteCode",
             "_orderBookCode",
             "_inferenceOrderBookCode",
+            // Baked by RootPN at deploy since contracts 4.0.36, so the note can
+            // DEPLOY the deal (`deployDeal`) and not merely address it. A code
+            // cell like the three above it: immutable, identical on every note
+            // of this generation, and nothing about reuse.
+            "_tokenContractCode",
             "_oracleCodeHash",
             "_oracleCodeDepth",
             "_oracleEventListCodeHash",
