@@ -122,11 +122,22 @@ const PRIVATE_NOTE_ABI: &str = include_str!("../../../../contracts/dex/PrivateNo
 /// Child codes a `PrivateNote` carries as whole cells. The decoder emits a
 /// `cell` field as a base64 BOC, so its repr-hash is directly comparable with
 /// the manifest's code hash.
+///
+/// `_tokenContractCode` is listed here as well as in [`NOTE_CODE_HASH_DEPTH_FIELDS`],
+/// and the pair is not redundant. `RootPN` derives the hash/depth halves from its
+/// compiled-in `TOKEN_CONTRACT_CODE_HASH`/`_DEPTH` constants, which every deployed
+/// root has by construction; the cell arrives separately at provisioning time through
+/// `setTokenContractCode` and is empty until someone calls it. So the hash/depth pin
+/// passes on a root that was never provisioned, and the note it hands out looks
+/// correct in every field an address is derived from — right up to the first
+/// `deployDeal`, which builds a `StateInit` from the empty cell and gets a deal at
+/// the wrong address with no code. Hashing the cell is what separates the two.
 const NOTE_CODE_CELL_FIELDS: &[(&str, &str)] = &[
     ("_privateNoteCode", "PrivateNote"),
     ("_pmpCode", "PMP"),
     ("_orderBookCode", "OrderBook"),
     ("_inferenceOrderBookCode", "InferenceOrderBook"),
+    ("_tokenContractCode", "TokenContract"),
 ];
 
 /// Child codes a `PrivateNote` carries as a (hash, depth) pair rather than a
