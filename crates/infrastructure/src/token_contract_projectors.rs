@@ -98,6 +98,17 @@ async fn seed_deal_skeleton(
 /// began is inert instead of destructive. A deal that has never been funded has
 /// no cycle to end and is skipped outright.
 ///
+/// A cycle EXISTS when `deposit` is set, not when `funded_at_chain` is. Both
+/// are written by the same `StreamFunded` statement, but only `deposit` is
+/// written unconditionally: `funded_at_chain` comes from the edge's
+/// `created_at`, which the gateway may omit or send unparseable — a case
+/// `persist_page` already handles by storing NULL and warning
+/// (`indexer_repo::should_warn_unparseable_created_at`). Testing the timestamp
+/// made one such edge permanent: the funding recorded a buyer and a deposit but
+/// no timestamp, every later reset then skipped this row, and the `coalesce`
+/// below served cycle one's buyer and deposit for cycle two's match. The
+/// deposit IS the funding; the timestamp only says when it happened.
+///
 /// Known gap, left open deliberately: this orders cycles, not events within
 /// one. A cycle-one event delivered out of order AFTER cycle two has started
 /// still writes into cycle two through its own `coalesce`. Closing that needs a
@@ -126,7 +137,7 @@ pub(crate) async fn end_funding_cycle(
                   last_chain_order = $2,
                   updated_at = now()
             where token_contract_address = $1
-              and funded_at_chain is not null
+              and deposit is not null
               and $2 > coalesce(last_chain_order, '')
         returning true"#,
     )

@@ -47,6 +47,12 @@ fn node(src: &str, chain_order: &str) -> EventNode {
     }
 }
 
+/// Like `node` but with no `created_at` at all — the shape `persist_page`
+/// stores when the gateway omits the field or sends something unparseable.
+fn node_without_timestamp(src: &str, chain_order: &str) -> EventNode {
+    EventNode { created_at: None, ..node(src, chain_order) }
+}
+
 /// Like `node` but with a custom `created_at` unix timestamp.
 fn node_at(src: &str, chain_order: &str, created_at: u64) -> EventNode {
     EventNode {
@@ -732,6 +738,80 @@ async fn a_second_funding_starts_a_new_cycle() {
             .await
             .unwrap();
     assert_eq!(tick_rows, 0, "the tick log must be cleared with the counter it backs");
+}
+
+/// A funding whose edge carried no usable `created_at` still counts as a cycle.
+///
+/// `funded_at_chain` comes from the edge timestamp, which the gateway may omit
+/// or send unparseable — `persist_page` stores NULL and warns rather than
+/// dropping the row, so the funding itself lands with a buyer, a deposit and a
+/// watermark but no timestamp. Keying the reset on that timestamp made the gap
+/// permanent: every later cycle boundary skipped the row and the `coalesce` in
+/// `apply_stream_funded` went on serving cycle one's buyer and deposit under
+/// cycle two's match.
+#[tokio::test]
+async fn a_cycle_funded_without_a_chain_timestamp_still_resets() {
+    let Some(pool) = setup().await else { return };
+    let tc = "0:tc_cycle_no_timestamp";
+    sqlx::query("delete from inference_deals where token_contract_address=$1")
+        .bind(tc)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Cycle one, funded off an edge the gateway gave no timestamp for.
+    let mut tx = pool.begin().await.unwrap();
+    project(
+        &mut tx,
+        &ev("StreamFunded", serde_json::json!({"buyer":"0:buyer1","deposit":"5000"})),
+        &node_without_timestamp(tc, "co-1"),
+    )
+    .await;
+    tx.commit().await.unwrap();
+
+    let (buyer, deposit, funded): (
+        Option<String>,
+        Option<String>,
+        Option<chrono::DateTime<chrono::Utc>>,
+    ) = sqlx::query_as(
+        "select buyer_note, deposit::text, funded_at_chain from inference_deals \
+             where token_contract_address=$1",
+    )
+    .bind(tc)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(buyer.as_deref(), Some("0:buyer1"), "precondition: cycle one is funded");
+    assert_eq!(deposit.as_deref(), Some("5000"), "precondition: cycle one has its deposit");
+    assert_eq!(funded, None, "precondition: the timestamp is the half that is missing");
+
+    // Cycle two, on the same address, by a different buyer.
+    let mut tx = pool.begin().await.unwrap();
+    project(
+        &mut tx,
+        &ev("StreamFunded", serde_json::json!({"buyer":"0:buyer2","deposit":"7000"})),
+        &node(tc, "co-2"),
+    )
+    .await;
+    tx.commit().await.unwrap();
+
+    let (buyer, deposit): (Option<String>, Option<String>) = sqlx::query_as(
+        "select buyer_note, deposit::text from inference_deals where token_contract_address=$1",
+    )
+    .bind(tc)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        buyer.as_deref(),
+        Some("0:buyer2"),
+        "a cycle with no funded_at_chain must still be ended by the next funding"
+    );
+    assert_eq!(
+        deposit.as_deref(),
+        Some("7000"),
+        "cycle one's deposit must not survive into cycle two's match"
+    );
 }
 
 /// The reset is gated on `last_chain_order`, because reprojection replays rows.
