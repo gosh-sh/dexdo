@@ -436,7 +436,23 @@ async fn link_deal_from_filled(
            on conflict (token_contract_address) do update
                set orderbook_address = coalesce(inference_deals.orderbook_address, excluded.orderbook_address),
                    seller_note = coalesce(inference_deals.seller_note, excluded.seller_note),
-                   buyer_note = coalesce(inference_deals.buyer_note, excluded.buyer_note),
+                   -- The buyer is the one field here that a SECOND match at the same
+                   -- deal address changes, and since contracts 4.0.36 a second match is
+                   -- ordinary: `cleanupUnopened` no longer destroys the deal, so a
+                   -- no-show returns the same `TokenContract` to the book and the next
+                   -- fill names a different buyer. First-wins would pin the row to a
+                   -- buyer who never funded it. Newest-wins by `last_chain_order`, so a
+                   -- REPLAY of an older fill (reprojection) still cannot walk it back,
+                   -- and `coalesce` on both branches keeps an orphan-repair Filled —
+                   -- which carries no `buyerNote` — from blanking a known one.
+                   -- `orderbook_address` and `seller_note` need none of this: the deal
+                   -- address derives from the seller's key and nonce, so neither can
+                   -- change while the address does not.
+                   buyer_note = case
+                       when excluded.last_chain_order > coalesce(inference_deals.last_chain_order, '')
+                           then coalesce(excluded.buyer_note, inference_deals.buyer_note)
+                       else coalesce(inference_deals.buyer_note, excluded.buyer_note)
+                   end,
                    last_chain_order = greatest(coalesce(inference_deals.last_chain_order, ''), excluded.last_chain_order),
                    updated_at = now()"#,
     )

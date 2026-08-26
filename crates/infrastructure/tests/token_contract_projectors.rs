@@ -609,3 +609,158 @@ async fn unknown_token_contract_event_returns_unknown() {
             .unwrap();
     assert_eq!(count, 1, "skeleton row must exist even for an Unknown event");
 }
+
+/// Run a full first cycle — funded, opened, one finalized tick, stopped — and
+/// leave it committed. Shared by the two deal-reuse tests below.
+async fn commit_first_cycle(pool: &PgPool, tc: &str) {
+    sqlx::query("delete from inference_deals where token_contract_address=$1")
+        .bind(tc)
+        .execute(pool)
+        .await
+        .unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    project(
+        &mut tx,
+        &ev("StreamFunded", serde_json::json!({"buyer":"0:buyer1","deposit":"5000"})),
+        &node(tc, "co-1"),
+    )
+    .await;
+    project(
+        &mut tx,
+        &ev("StreamOpened", serde_json::json!({"buyer":"0:buyer1","pricePerTick":"10"})),
+        &node(tc, "co-2"),
+    )
+    .await;
+    project(
+        &mut tx,
+        &ev("TickFinalized", serde_json::json!({"finalizedOwed":"10","deposit":"4990"})),
+        &node(tc, "co-3"),
+    )
+    .await;
+    project(
+        &mut tx,
+        &ev("StreamStopped", serde_json::json!({"buyer":"0:buyer1","toSeller":"10","refundToBuyer":"4990"})),
+        &node(tc, "co-4"),
+    )
+    .await;
+    tx.commit().await.unwrap();
+}
+
+/// A deal address serves more than one match since contracts 4.0.36:
+/// `cleanupUnopened` returns the `TokenContract` to the book instead of
+/// destroying it. The row is keyed by that address, so a second funding must
+/// start from a clean slate rather than inherit the first match's buyer,
+/// settlement and tick log.
+#[tokio::test]
+async fn a_second_funding_starts_a_new_cycle() {
+    let Some(pool) = setup().await else { return };
+    let tc = "0:tc_cycle_reset";
+    commit_first_cycle(&pool, tc).await;
+
+    let (kind, ticks): (Option<String>, i32) = sqlx::query_as(
+        "select close_kind, finalized_ticks from inference_deals where token_contract_address=$1",
+    )
+    .bind(tc)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(kind.as_deref(), Some("STOPPED"), "precondition: cycle one closed");
+    assert_eq!(ticks, 1, "precondition: cycle one recorded its tick");
+
+    // Second match on the same address: a different buyer, a different deposit.
+    let mut tx = pool.begin().await.unwrap();
+    project(
+        &mut tx,
+        &ev("StreamFunded", serde_json::json!({"buyer":"0:buyer2","deposit":"7000"})),
+        &node(tc, "co-5"),
+    )
+    .await;
+    tx.commit().await.unwrap();
+
+    let (buyer, deposit, ppt, opened, settled, kind, clean, disputed, ticks): (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<String>,
+        Option<bool>,
+        Option<chrono::DateTime<chrono::Utc>>,
+        i32,
+    ) = sqlx::query_as(
+        "select buyer_note, deposit::text, price_per_tick::text, opened_at_chain, \
+         settled_at_chain, close_kind, clean_settlement, disputed_at_chain, finalized_ticks \
+         from inference_deals where token_contract_address=$1",
+    )
+    .bind(tc)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(buyer.as_deref(), Some("0:buyer2"), "the new match's buyer must replace the old one");
+    assert_eq!(deposit.as_deref(), Some("7000"), "the new match's deposit must replace the old one");
+    assert_eq!(ppt, None, "price_per_tick belongs to a cycle and is not known yet");
+    assert_eq!(opened, None, "opened_at_chain must not carry over");
+    assert_eq!(settled, None, "a live deal must not report a settlement");
+    assert_eq!(kind, None, "close_kind must not carry over");
+    assert_eq!(clean, None, "clean_settlement must not carry over");
+    assert_eq!(disputed, None, "disputed_at_chain must not carry over");
+    assert_eq!(ticks, 0, "the tick counter restarts with the cycle");
+
+    let tick_rows: i64 =
+        sqlx::query_scalar("select count(*) from inference_ticks where token_contract_address=$1")
+            .bind(tc)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(tick_rows, 0, "the tick log must be cleared with the counter it backs");
+}
+
+/// The reset is gated on `last_chain_order`, because reprojection replays rows.
+/// An older funding arriving after a newer cycle has begun must be inert — an
+/// ungated reset would wipe the live cycle every time the projection loop
+/// replayed the first one.
+#[tokio::test]
+async fn a_replayed_earlier_funding_does_not_reset_a_later_cycle() {
+    let Some(pool) = setup().await else { return };
+    let tc = "0:tc_cycle_replay";
+    commit_first_cycle(&pool, tc).await;
+
+    let mut tx = pool.begin().await.unwrap();
+    project(
+        &mut tx,
+        &ev("StreamFunded", serde_json::json!({"buyer":"0:buyer2","deposit":"7000"})),
+        &node(tc, "co-5"),
+    )
+    .await;
+    project(
+        &mut tx,
+        &ev("StreamOpened", serde_json::json!({"buyer":"0:buyer2","pricePerTick":"20"})),
+        &node(tc, "co-6"),
+    )
+    .await;
+    tx.commit().await.unwrap();
+
+    // Replay of cycle one's funding, at its original chain order.
+    let mut tx = pool.begin().await.unwrap();
+    project(
+        &mut tx,
+        &ev("StreamFunded", serde_json::json!({"buyer":"0:buyer1","deposit":"5000"})),
+        &node(tc, "co-1"),
+    )
+    .await;
+    tx.commit().await.unwrap();
+
+    let (buyer, deposit, ppt): (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+        "select buyer_note, deposit::text, price_per_tick::text from inference_deals \
+         where token_contract_address=$1",
+    )
+    .bind(tc)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(buyer.as_deref(), Some("0:buyer2"), "a replay must not restore the old buyer");
+    assert_eq!(deposit.as_deref(), Some("7000"), "a replay must not restore the old deposit");
+    assert_eq!(ppt.as_deref(), Some("20"), "a replay must not clear the live cycle");
+}
