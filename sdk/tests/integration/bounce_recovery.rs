@@ -105,6 +105,9 @@ async fn a_bounced_operation_gives_the_money_back_and_unlocks_the_note_local() {
             dest_deposit_hash: ABSENT_NOTE_DIH.to_string(),
             token_type: TOKEN_TYPE_NACKL,
             amount: STAKE_AMOUNT,
+            // Nothing physical rides along: this transfer is aimed at a note that
+            // does not exist, and the point is what the bounce gives back.
+            ecc_amount: 0,
         },
         Signer::Keys { keys: note.note.keys.clone() },
     )

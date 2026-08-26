@@ -275,6 +275,8 @@ async fn try_every_exit(
                 dest_deposit_hash: sink.note.dih_dec.clone(),
                 token_type: TOKEN_TYPE_NACKL,
                 amount: TRANSFER_AMOUNT,
+                // Record only — the gate under test is the refusal, not the coin.
+                ecc_amount: 0,
             },
             keys.clone(),
         )

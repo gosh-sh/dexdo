@@ -65,6 +65,9 @@ async fn test_get_notes_history_via_dex() {
             dest_deposit_hash: pn2_dih,
             token_type: TOKEN_TYPE_NACKL,
             amount: transfer_amount,
+            // The ledger record alone, as this call moved before 4.0.36: what is
+            // asserted downstream is the history entry, not a coin movement.
+            ecc_amount: 0,
         },
         Signer::Keys { keys: pn1_keys },
     )

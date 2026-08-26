@@ -242,7 +242,18 @@ pub struct ParamsOfGenerateCoupon {
 pub struct ParamsOfInitTransfer {
     pub dest_deposit_hash: String,
     pub token_type: u32,
+    /// Ledger figure to move. Must be `>= minStakeValue(token_type)`.
     pub amount: u128,
+    /// Physical ECC of `token_type` to send along with the ledger record, added
+    /// in 4.0.36. A note's balance is a number RootPN custodies; this is the
+    /// coin itself, and the two move independently.
+    ///
+    /// `0` sends the record alone, which is exactly what this call did before
+    /// the parameter existed — so it is the value that preserves the old
+    /// behaviour, not a placeholder. The contract names the figure rather than
+    /// offering "the whole pocket" because only a named one can say both "all
+    /// of it" and "part of it".
+    pub ecc_amount: u128,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1498,7 +1509,7 @@ impl PrivateNote {
 }
 
 #[cfg(test)]
-mod inference_abi_tests {
+mod abi_shape_tests {
     //! Guards the inference / stream-deal `Params` structs against the bundled
     //! `PrivateNote.abi.json`: each must serialize to exactly the ABI input
     //! names. The inference methods are keyed by `modelHash` (the book code is
@@ -1585,6 +1596,36 @@ mod inference_abi_tests {
                 gas_reserve: 1,
             }),
             abi_input_names("deployDeal")
+        );
+    }
+
+    /// The value-movement calls, pinned for the reason `initTransfer` taught:
+    /// 4.0.36 added an `eccAmount` input, nothing in this crate had to change to
+    /// keep compiling, and the gap surfaced only on chain as
+    /// `Wrong data format in \`eccAmount\` parameter: null`. A shape test costs
+    /// one line per call and turns that into a build failure.
+    #[test]
+    fn transfer_params_match_abi() {
+        assert_eq!(
+            keys(&ParamsOfInitTransfer {
+                dest_deposit_hash: "1".into(),
+                token_type: 1,
+                amount: 1,
+                ecc_amount: 0,
+            }),
+            abi_input_names("initTransfer")
+        );
+        assert_eq!(
+            keys(&ParamsOfOfferTransfer {
+                token_type: 1,
+                amount: 1,
+                sender_deposit_hash: "1".into(),
+            }),
+            abi_input_names("offerTransfer")
+        );
+        assert_eq!(
+            keys(&ParamsOfWithdrawTokens { dest_wallet_addr: "0:1".into(), dapp_id: "1".into() }),
+            abi_input_names("withdrawTokens")
         );
     }
 
