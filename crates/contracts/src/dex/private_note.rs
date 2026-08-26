@@ -455,6 +455,51 @@ pub struct ParamsOfDeployInferenceOrderBook {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+/// Parameters for `PrivateNote.deployDeal`.
+///
+/// A deal used to be created by an external message signed with the seller key.
+/// Its constructor now requires `msg.sender` to be the canonical `PrivateNote`
+/// for the deal's `depositIdentifierHash`, and an external message has no
+/// sender, so that route is refused at the door: this is the only way to put a
+/// `TokenContract` on chain.
+///
+/// The address still derives from `(this note's key, nonce)` alone, so the book,
+/// the buyer's note and `RootPN` all keep finding the deal by the same
+/// computation. The terms below are constructor arguments and are NOT part of
+/// it — which is exactly why the constructor authenticates the sender.
+pub struct ParamsOfDeployDeal {
+    /// Deal nonce; with this note's key it fixes the deal address.
+    pub nonce: u64,
+    /// Model name this deal serves, at most 127 bytes. The constructor
+    /// re-derives `sha256(model_name)` and refuses a mismatch, so this must be
+    /// `model_hash`'s preimage.
+    pub model_name: String,
+    /// `uint256` sha256(`model_name`), decimal/hex string.
+    pub model_hash: String,
+    /// SHELL per tick (P). Must be `> 0`.
+    pub price_per_tick: u128,
+    /// Upper bound on ticks this deal serves. Must be `>= 2` — a deal serves a
+    /// probe tick plus at least one stream tick.
+    pub max_ticks: u128,
+    /// ECC[2] sent with the deploy, which every entrypoint then burns its
+    /// measured charge from. It is a reserve, not a life-support budget: the
+    /// deal lands in this note's dApp and mints its own native floor, so
+    /// running the reserve down costs a refused call rather than a contract
+    /// that can never be closed.
+    ///
+    /// Budget `0.300 + 0.015 * max_ticks` SHELL for a plain run — deploy,
+    /// offer, match, open, probe, claims, close, withdraw — plus a second
+    /// terminal charge for the paths a later one winds down (`dispute` →
+    /// `releaseDispute`, `sellerStop` → `close`). Do not carry over the older
+    /// figures (0.240, 0.215 + 0.013·T, 0.210 + 0.015·T): they sized mechanisms
+    /// that no longer exist, and the first of them undercounts by 0.070.
+    /// [`PrivateNote::fund_deploy_shell`] tops a short reserve up, unlimited
+    /// repeats.
+    pub gas_reserve: u128,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 /// Parameters for `PrivateNote.postSellOffer`.
 ///
 /// The note no longer carries the offer terms: it derives the canonical
@@ -538,8 +583,12 @@ pub struct ParamsOfCancelAllInferenceOrders {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 /// Parameters for the streaming-deal driver methods `streamStop`,
-/// `streamDispute`, `streamReclaim` and `streamCleanup` (buyer note → deal
-/// `TokenContract`).
+/// `streamDispute` and `streamCleanup` (buyer note → deal `TokenContract`).
+///
+/// The deal is named by address, not by the `(sellerPubkey, nonce)` pair it
+/// derives from, so the note sends these `bounce: true` and a wrong address
+/// returns the value instead of silently doing nothing. Authorisation is on the
+/// deal side: each of the three requires `msg.sender` to be the recorded buyer.
 pub struct ParamsOfStreamDeal {
     pub token_contract: String,
 }
@@ -1198,6 +1247,32 @@ impl PrivateNote {
         self.send_message(Some(call_set), None, signer).await
     }
 
+    /// # Deploy this note's canonical deal `TokenContract`
+    ///
+    /// Original contract method: `deployDeal`
+    ///
+    /// The deal lands in THIS note's dApp rather than one of its own, which is
+    /// what makes its `ensureBalance` work and puts its settlement events on
+    /// the DEX capture stream the indexer already reads.
+    ///
+    /// Send `gas_reserve` with room to spare; see [`ParamsOfDeployDeal`]. The
+    /// deploy is `bounce: false` — there is no account at the target yet — so a
+    /// refusal surfaces only as an address that never goes Active.
+    ///
+    /// Should be signed with PrivateNote owner keys.
+    pub async fn deploy_deal(
+        &self,
+        params: ParamsOfDeployDeal,
+        signer: Signer,
+    ) -> KitResult<ResultOfSendMessage> {
+        let call_set = CallSet {
+            function_name: "deployDeal".to_string(),
+            header: None,
+            input: Some(json!(params)),
+        };
+        self.send_message(Some(call_set), None, signer).await
+    }
+
     /// # Post a SELL offer to an InferenceOrderBook
     ///
     /// Original contract method: `postSellOffer`
@@ -1499,6 +1574,17 @@ mod inference_abi_tests {
         assert_eq!(
             keys(&ParamsOfFundDeployShell { nonce: 1, tc_shell: 1 }),
             abi_input_names("fundDeployShell")
+        );
+        assert_eq!(
+            keys(&ParamsOfDeployDeal {
+                nonce: 1,
+                model_name: "m".into(),
+                model_hash: "1".into(),
+                price_per_tick: 1,
+                max_ticks: 2,
+                gas_reserve: 1,
+            }),
+            abi_input_names("deployDeal")
         );
     }
 
