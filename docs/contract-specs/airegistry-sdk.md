@@ -47,10 +47,17 @@ address every `TokenContract` of that owner lives at.
 
 | Method | Contract method | Params / Result | Description |
 | --- | --- | --- | --- |
-| `register_token_contract` | `registerTokenContract` | `ParamsOfRegisterTokenContract { seller_pubkey, nonce }` | **Cannot be called from the SDK.** Since 4.0.36 this no longer deploys anything: it is a `pure` self-announcement that recomputes the canonical address from the pair, requires `msg.sender` to equal it, and emits `TokenContractRegistered`. Only the already-deployed deal can satisfy that, so an external message reverts `ERR_INVALID_SENDER`. The deal is created by the seller's note — see [§2](#2-note-side-inference--dexprivate_noters). |
 | `get_token_contract_address` | `getTokenContractAddress` | `ParamsOfGetTokenContractAddress { seller_pubkey, nonce }` → `ResultOfGetTokenContractAddress { address }` | Deterministic `TokenContract` address for `(seller_pubkey, nonce)`. |
 | `get_owner_pubkey` | `getOwnerPubkey` | → `ResultOfGetOwnerPubkey { owner_pubkey }` | The configured owner pubkey. |
 | `get_version` | `getVersion` | → `ResultOfGetVersion { version, name }` | Contract version + name. |
+
+Not wrapped: `registerTokenContract`, deliberately. Since 4.0.36 it no longer
+deploys anything — it is a `pure` self-announcement that recomputes the
+canonical address from `(sellerPubkey, nonce)`, requires `msg.sender` to equal
+it, and emits `TokenContractRegistered`. Only the already-deployed deal
+satisfies that, so a wrapper for it could reach nothing but
+`ERR_INVALID_SENDER`. Deals are created by the seller's note — see
+[§2](#2-note-side-inference--dexprivate_noters).
 
 ### TokenContract — `airegistry/token_contract.rs`
 
@@ -107,7 +114,7 @@ rest are seller-only or note/book callbacks.
 | `get_buyer_pubkey` | `getBuyerPubkey` | `buyer_pubkey` | Buyer pubkey. |
 | `get_endpoint_cipher` | `getEndpointCipher` | `endpoint_cipher` (hex) | Encrypted endpoint handed over at `open`. |
 | `get_model_name` | `getModelName` | model name | Model name this deal serves. |
-| `get_shell_balance` | `getShellBalance` | SHELL balance | The deal's physical SHELL (ECC[2]) balance. |
+| `get_shell_balance` | `getShellBalance` | SHELL balance | The deal's escrow LEDGER (`_balance`). Not the ECC[2] on the account — that is the gas reserve every entrypoint burns from, and it is read off the account record, not through a getter. |
 | `get_version` | `getVersion` | `version, name` | Contract version + name. |
 
 Not wrapped: `getSubscription` (take-or-pay week accounting), `getBuyerBond`,
@@ -160,7 +167,8 @@ on-chain.
 | Method | Contract method | Params | Description |
 | --- | --- | --- | --- |
 | `deploy_inference_order_book` | `deployInferenceOrderBook` | `ParamsOfDeployInferenceOrderBook { model_hash, model_name }` | Deploy an `InferenceOrderBook` from this note (permissionless at the deterministic per-model address). The book code is baked into the note. |
-| `fund_deploy_shell` | `fundDeployShell` | `ParamsOfFundDeployShell { nonce, tc_shell }` | Pre-fund the note's own canonical deal address with SHELL. A deploy message only activates an account that already holds SHELL, so this runs before the deal is created. |
+| `deploy_deal` | `deployDeal` | `ParamsOfDeployDeal { nonce, model_name, model_hash, price_per_tick, max_ticks, gas_reserve }` | Deploy this note's canonical deal `TokenContract`, the only way to create one: the constructor requires `msg.sender` to be the canonical note for its `depositIdentifierHash`. The address derives from `(this note's key, nonce)` and the terms are constructor arguments, not part of it. `gas_reserve` is ECC[2] sent with the deploy — budget `0.300 + 0.015 * max_ticks` SHELL. |
+| `fund_deploy_shell` | `fundDeployShell` | `ParamsOfFundDeployShell { nonce, tc_shell }` | Top up the deal's ECC[2] gas reserve, its only route to more. Sends under flag 1 so the credit stays SHELL — the pocket every entrypoint burns from; the deal mints its own native floor and needs nothing sent ahead of it. `tc_shell = 0` skips the send entirely. |
 | `post_sell_offer` | `postSellOffer` | `ParamsOfPostSellOffer { flags, nonce, ttl }` | Post a SELL offer, indirectly: the note authorises its canonical `TokenContract` for `nonce` (`postFromNote`) and that deal posts the offer with its own constructor-pinned `price_per_tick` / `max_ticks` / `model_hash`. The terms cannot be overridden per offer — deploy a deal with different ones. The deal must already exist, or the call is a no-op. `ttl` is mandatory and bounded: `0` or `> MAX_SELL_TTL` (3600 s) reverts `ERR_SELL_DEADLINE_TOO_LONG` — `0` is NOT good-till-cancel here, unlike the BUY deadline it resembles. |
 | `place_inference_buy` | `placeInferenceBuy` | `ParamsOfPlaceInferenceBuy { model_hash, max_price_per_tick, ticks, escrow, flags, deadline }` | Place a BUY order with SHELL escrow. |
 | `cancel_inference_order` | `cancelInferenceOrder` | `ParamsOfCancelInferenceOrder { model_hash, order_id }` | Cancel one resting inference order owned by this note. |
@@ -169,10 +177,10 @@ on-chain.
 | `stream_dispute` | `streamDispute` | `ParamsOfStreamDeal { token_contract }` | Buyer note disputes the claimed delta (§4.2). |
 | `stream_cleanup` | `streamCleanup` | `ParamsOfStreamDeal { token_contract }` | Buyer note recovers a deal it funded and the seller never opened: refunds the whole deposit, returns the bond unslashed, destroys the deal. Scoped to the never-opened case by a permanent latch on the deal. |
 
-Not wrapped: `deployDeal` (nonce, model name/hash, price per tick, max ticks,
-gas reserve) — the seller-note call that creates the deal, and today the only
-missing piece of a full inference e2e; and `fundDeal`, the buyer's direct
-funding path that bypasses the book.
+Not wrapped: `fundDeal`, the seller-note call that ships the deal its gas and
+the `2 * pricePerTick` mirror bond; and `creditFromDeal` / `creditFromBook` /
+`touchDeal` / `onDealClosed`, which are callbacks the deal and the book send
+back to the note.
 
 The three `stream_*` calls name the deal by **address**, not by the
 `(sellerPubkey, nonce)` pair the address derives from, so a wrong address is not
@@ -203,6 +211,7 @@ inference e2e tests drive.
 **Order book / streaming (note-side, via the facade)**
 
 - `deploy_inference_order_book`, `get_inference_order_book_address`
+- `deploy_deal`, `fund_deploy_shell`
 - `post_sell_offer`, `place_inference_buy`
 - `cancel_inference_order`, `cancel_all_inference_orders`
 - `stream_stop`, `stream_dispute`, `stream_cleanup`
@@ -221,8 +230,8 @@ inference e2e tests drive.
 
 ---
 
-A full deal walks: seller `deploy_root_model` → `fund_deploy_shell` →
-`deployDeal` (no wrapper yet) → `post_sell_offer`; buyer `place_inference_buy` →
+A full deal walks: seller `deploy_root_model` → `deploy_deal` →
+`fundDeal` (the bond, no wrapper yet) → `post_sell_offer`; buyer `place_inference_buy` →
 the match funds the deal through `fundFromOrderBook`; seller `token_contract_open`
 → `claimTokens` per claim with `finalize` promoting them; buyer `stream_stop` (or
 `stream_dispute` / `stream_cleanup`). The settlement read-model built from the

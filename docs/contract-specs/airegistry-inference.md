@@ -139,10 +139,10 @@ through `dodex_chain::Dex` (no DB, no HTTP — there are no inference handlers):
 | Test | Covers |
 | --- | --- |
 | `e2e_inference` | Note deploys the book, places a resting BUY with SHELL escrow, cancels it. |
-| `e2e_inference_match` | External `TokenContract` deploy + a SELL offer crossed by a BUY ⇒ the match funds the `TokenContract` (handover). |
+| `e2e_inference_match` | The note deploys its own deal (`deployDeal`) + a SELL offer crossed by a BUY ⇒ the match funds the deal (handover). |
 | `e2e_inference_clob` | Two flows: a partial fill (2-tick offer crossed by a 4-tick limit buy, 2 ticks rest) + `getBestBidAsk`/`getWeeklyMedianPrice`, and a match's `Filled` event confirmed by its routing id. |
 | `e2e_inference_orders` | The book as an order book, with no deal at all: two bids, a single `cancelInferenceOrder` by id that takes only its own, and a buy whose deadline has already passed — refused before `tvm.accept()`, so `nextOrderId` never moves. Fast (~35 s). |
-| `e2e_inference_funding` | `fundDeployShell`: a note pays its own canonical `TokenContract` address, and the deal contract then deploys onto it with no giver in the run. Also pins the two things the call must not do — reach the RootModel, which it no longer has a leg for, and send anything at all when asked for `0`. Fast (~2 min). |
+| `e2e_inference_funding` | `deployDeal` + `fundDeployShell` with no giver in the run: the note deploys its own deal paying the gas reserve out of its own SHELL, then tops that reserve up and is checked to have moved exactly the figure it was asked for, in ECC[2] rather than native. Also pins `tcShell = 0` sending nothing at all. Fast (~2 min). |
 
 The streaming-deal suites — `e2e_inference_stream`, `e2e_inference_settlement`,
 `e2e_inference_twosided`, `e2e_inference_range`, `e2e_inference_subscription`,
@@ -152,8 +152,9 @@ is the whole of the inference e2e coverage; the deal lifecycle past a match is
 not exercised end to end.
 
 They share the seed-note pool (`tests/fixtures/seed_notes.json` /
-`E2E_SEED_NOTES`) like the other e2e tests; the note must additionally hold
-SHELL for escrow, and the giver must be reachable (shellnet only). Run:
+`E2E_SEED_NOTES`) like the other e2e tests. The note must additionally hold
+SHELL — for escrow, and now for the gas reserve it sends with every deal it
+deploys. No giver is used by any of them. Run:
 
 ```sh
 cargo test -p dodex-api --test e2e_inference -- --ignored --nocapture
@@ -168,10 +169,12 @@ All of them run in the e2e pipeline's `e2e_tests` step, which excludes nothing:
 no binary is an error in nextest rather than an empty exclusion, so a filter
 naming a suite that has since been deleted fails the step before any test runs.
 
-Most of these deploy their `TokenContract` off the shared shellnet giver
-because it is the cheap route. It is not the route the contracts are designed
-around — a seller in production has only a note — so the note-funded path is
-covered on its own by `e2e_inference_funding`.
+None of these needs a giver any more. Every deal is deployed the way a seller
+in production deploys one — from the seller's own note, which pays the gas
+reserve out of its own SHELL — so the route under test is the route that ships.
+The external, giver-funded deploy the suites used before 4.0.36 is not merely
+retired: the deal's constructor requires `msg.sender` to be the canonical note,
+and an external message has none.
 
 **A deal only publishes its price when it closes.** `_recordTrade` is reachable
 only from `reportFinalized`, which the `TokenContract` calls from `_settleFees`
