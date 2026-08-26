@@ -63,7 +63,7 @@ variables:
   - &node_image_tag "latest-dev"
   - &busybox_image "busybox:musl"
   - &tvm_cli_version "v3.0.4-rc.an"
-  # Compiler per CONTRACT, not per directory. RootPN and exchange/USDCBridge
+  # Compiler per CONTRACT, not per directory. RootPN and exchange/eccUSDCBridge
   # are 0.80.0; the other twelve DEX/airegistry contracts and
   # exchange/DepositVoucher are 0.81.0. This pipeline compiles only the
   # thirteen that stage_contracts.sh stages, so it needs both compilers --

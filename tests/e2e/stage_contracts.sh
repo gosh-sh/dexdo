@@ -21,11 +21,11 @@ set -euo pipefail
 # placed straight from source; airegistry: the 5 AI-inference contracts.
 #
 # The compiler is chosen per CONTRACT, not per directory: RootPN and
-# exchange/USDCBridge are built with 0.80.0, everything else here (plus
+# exchange/eccUSDCBridge are built with 0.80.0, everything else here (plus
 # exchange/DepositVoucher) with 0.81.0. Both exchange contracts are outside
 # this list on purpose — this script never rebuilds them, so their committed
 # artifacts survive untouched and the version split cannot be got wrong.
-# Anyone extending the lists below to cover exchange/ must build USDCBridge
+# Anyone extending the lists below to cover exchange/ must build eccUSDCBridge
 # with $SOLD_OLD: the zerostate generator loads its code unconditionally, so
 # a wrong-compiler build lands in every zerostate with nothing to flag it.
 DEX13=(PrivateNote RootPN PMP OrderBook Nullifier RootOracle Oracle OracleEventList)
@@ -91,8 +91,13 @@ n_tvc=$(find "$D080" "$D081/dex" "$D081/airegistry" -name '*.tvc' | wc -l)
 # no business rebuilding it -- but `rm -rf` on a sibling path is one typo away
 # from taking it out, and its absence would surface as a generator failure
 # well downstream of the cause.
-test -f "$BUILD_DIR/contracts/0.80.0_compiled/exchange/USDCBridge.tvc" \
-  || { echo "FATAL: exchange/USDCBridge.tvc is gone from the 0.80.0 tree — this script must not touch exchange/"; exit 1; }
+# Named `eccUSDCBridge` since acki-nacki 2302288db ("Contracts/bridge", #2504),
+# which renamed the pair in one commit. The guard names the artifact rather than
+# globbing the directory on purpose — a glob would pass on any file left there
+# and stop answering the question this asks — so a rename upstream surfaces here
+# as a FATAL and has to be followed deliberately, which is what happened.
+test -f "$BUILD_DIR/contracts/0.80.0_compiled/exchange/eccUSDCBridge.tvc" \
+  || { echo "FATAL: exchange/eccUSDCBridge.tvc is gone from the 0.80.0 tree — this script must not touch exchange/"; exit 1; }
 
 echo "==> [5/5] manifest from the staged artifacts"
 # Same tvm-cli binary the pin cascade above was pinned to (not whatever

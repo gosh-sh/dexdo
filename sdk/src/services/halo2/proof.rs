@@ -23,7 +23,7 @@ pub const MAINNET_HISTORY_PROOF_WINDOW_SIZE: u64 = 128;
 
 /// Canonical Hermez-anchored KZG SRS (K=19, ~64 MB) served by GOSH. The
 /// prover's verifying key is derived from this exact SRS, and the on-chain
-/// `RootPN` / `USDCBridge` verifier is anchored to the same Hermez Perpetual
+/// `RootPN` / `eccUSDCBridge` verifier is anchored to the same Hermez Perpetual
 /// Powers of Tau ceremony — a different SRS yields proofs that fail
 /// verification. The prover downloads it once and caches it next to the keygen
 /// artefacts (`<cache>/hermez_kzg_srs_k19.bin`).
