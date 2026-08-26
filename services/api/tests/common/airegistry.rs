@@ -1,34 +1,31 @@
-// External-deploy helper for AI Registry contracts that are NOT deployed from
-// a note via an internal message. Right now that is just `TokenContract` (the
-// seller's per-deal escrow): the e2e CLOB-match flow needs one on-chain before
-// a sell offer can reference it.
+// Deal-contract helpers for the AI Registry e2e suites.
 //
-// The kit has no high-level "deploy from .tvc" entry point, so we drive the
-// SDK primitives directly: derive the deterministic address from the
-// DeploySet, create + fund it via the default giver, then deploy + wait Active.
-// The book itself is still deployed by the note (`deployInferenceOrderBook`),
-// so it needs no external deploy.
+// Contracts 4.0.36 moved the deal on chain. A `TokenContract` is deployed by the
+// seller's `PrivateNote` (`deployDeal`) as an internal message and lands in the
+// note's DEX dApp, so it is addressed like any other DEX contract and its
+// settlement events reach the indexer's existing capture stream.
 //
-// Acki Nacki specifics that make this work:
-//   * a freshly externally-deployed contract is the root of its own dApp
-//     (`dapp_id == account_id`), so it is addressed via
-//     `self_rooted_contract_params`, not the System dApp;
-//   * native value does not cross a dApp boundary, so the giver credit must be
-//     sent as ECC SHELL with flag 16 (which lands it as the new account's
-//     native gas), not as native `value`.
+// The external route this file used to drive is not merely deprecated, it is
+// refused: the constructor requires `msg.sender` to be the canonical note for
+// the deal's `depositIdentifierHash`, and an external message has no sender. So
+// the giver-funded create-then-deploy dance is gone, and with it the flag-16
+// send that existed only because a self-rooted account could not be reached
+// with native value.
+//
+// What survives is the address derivation. The deal's three statics
+// (`_sellerPubkey`, `_rootModelAddress`, `_nonce`) and its code are unchanged,
+// so the address is still computable offline, before anything exists — which is
+// what lets a test watch the address across the deploy that fills it.
 
 #![allow(dead_code)]
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use ackinacki_kit::contracts::account::AccountStatus;
 use ackinacki_kit::contracts::account::ParamsOfWaitAccount;
 use ackinacki_kit::contracts::dapp::SystemDapp;
 use ackinacki_kit::contracts::event::query_events;
-use ackinacki_kit::contracts::giver::send_currency_with_flag_from_default_giver;
 use ackinacki_kit::contracts::traits::AccountAccessor;
-use ackinacki_kit::contracts::traits::SendMessage;
 use ackinacki_kit::tvm_client::abi::encode_message;
 use ackinacki_kit::tvm_client::abi::Abi;
 use ackinacki_kit::tvm_client::abi::CallSet;
@@ -41,11 +38,14 @@ use ackinacki_kit::tvm_client::crypto::KeyPair;
 use ackinacki_kit::tvm_client::ClientContext;
 use anyhow::anyhow;
 use base64::Engine as _;
+use dodex_chain::dex_contract_params;
 use dodex_chain::self_rooted_contract_params;
 use dodex_contracts::airegistry::inference_order_book::ResultOfGetStats;
 use dodex_contracts::airegistry::super_root::ParamsOfGetRootModelAddress;
 use dodex_contracts::airegistry::super_root::SuperRoot;
 use dodex_contracts::airegistry::token_contract::TokenContract;
+use dodex_contracts::dex::private_note::ParamsOfDeployDeal;
+use dodex_contracts::dex::private_note::PrivateNote;
 use serde_json::json;
 
 use super::e2e_setup::model_hash_dec;
@@ -66,13 +66,27 @@ const INFERENCE_ORDER_BOOK_TVC: &[u8] =
 /// nothing to execute, then or ever.
 const EMPTY_CELL_HASH: &str = "96a296d224f285c67bee93c30f8a309157f0daa35dc5b87e410b78630a09cfc7";
 
-/// ECC currency id for SHELL.
-const SHELL_CURRENCY_ID: u32 = 2;
-/// SHELL sent (as ECC, flag 16) to create + gas the fresh account. The ctor
-/// self-mints its MIN_BALANCE via `gosh.mintshellq`, so the giver only needs to
-/// cover deploy compute + the ctor's internal register-callback forward — keep
-/// it modest so a run does not drain the shared shellnet giver.
-const CREATION_SHELL: u64 = 200_000_000_000;
+/// The ECC[2] reserve a deal deploy carries, in SHELL units (1 SHELL = 1e9).
+///
+/// `deployDeal`'s docstring budgets **0.300 + 0.015·T** for a plain run —
+/// deploy, offer, match, open, probe, T claims, close, withdraw — and every
+/// entrypoint burns its measured charge from this one pot. A suite that also
+/// disputes or seller-stops pays a second terminal charge, so that is added
+/// here rather than left for each test to remember.
+///
+/// Do not reach for the 0.240 that still appears in the contracts PR body: it
+/// credited `fundDeal` with topping the reserve up (it does not — the ECC used
+/// to convert to native on arrival and never reached it) and undercounts by
+/// 0.070. The older 0.215 + 0.013·T and 0.210 + 0.015·T sized a mechanism in
+/// which every entry drew on a native deposit instead.
+const RESERVE_BASE: u128 = 300_000_000;
+const RESERVE_PER_TICK: u128 = 15_000_000;
+const RESERVE_SECOND_TERMINAL: u128 = 45_000_000;
+
+/// Gas reserve to send with a deal of `max_ticks` ticks. See [`RESERVE_BASE`].
+pub fn deal_gas_reserve(max_ticks: u128) -> u128 {
+    RESERVE_BASE + RESERVE_PER_TICK * max_ticks + RESERVE_SECOND_TERMINAL
+}
 
 /// Canonical shellnet `SuperRoot` — the `SUPER_ROOT_ADDR` baked into the 4.0.x
 /// `InferenceOrderBook` (`contracts/airegistry/InferenceOrderBook.sol`). A
@@ -200,9 +214,11 @@ pub async fn wait_sell_offer_rested(
 
 /// Immutable deal config passed to the `TokenContract` constructor.
 ///
-/// These are also the terms the TC posts to the book: `postSellOffer` on the
-/// note carries only `(flags, nonce)`, so an offer always rests at this
-/// `price_per_tick` for this `max_ticks`.
+/// These are also the terms the deal posts to the book: `postSellOffer` on the
+/// note carries only `(flags, nonce, ttl)`, so an offer always rests at this
+/// `price_per_tick` for this `max_ticks`. They are constructor arguments and
+/// not part of the address — which is why the constructor authenticates its
+/// sender, so nobody else can occupy the address with terms of their own.
 pub struct TokenDeal {
     pub model_name: String,
     pub price_per_tick: u128,
@@ -226,39 +242,33 @@ pub async fn canonical_root_model_address(
         .map_err(|e| anyhow!("getRootModelAddress({seller_pubkey}): {e:?}"))
 }
 
-/// A `TokenContract` deploy worked out but not yet sent: the address it will
-/// land on, and the two halves of the message that puts it there.
+/// Where the seller's deal for `(note key, nonce)` will land.
 ///
-/// The address is derivable before anything is on chain, which is the whole
-/// point — a cross-dApp deploy only activates on an address that ALREADY holds
-/// SHELL, so whoever is paying has to know where to send it first.
-pub struct TokenContractDeploy {
-    pub address: String,
-    deploy_set: DeploySet,
-    ctor: CallSet,
-    keys: KeyPair,
-}
-
-/// Work out where a `TokenContract` for `(seller pubkey, nonce)` will land and
-/// what deploys it, without sending anything.
+/// Derived offline from the deal's three statics plus the vendored
+/// `TokenContract` code — the same inputs `DexLib.buildTokenContractStateInit`
+/// uses inside the note, which is what makes the two derivations agree. The
+/// note is never told this address, so an agreement between them is the only
+/// evidence that a deploy went where it was meant to.
 ///
-/// `seller_pubkey_hex` is the seller note's owner pubkey (hex, with or without
-/// `0x`); it becomes the `_sellerPubkey` static so the note's key can sign the
-/// owner ops (`open`/`advance`/…). `_rootModelAddress` is derived from the
-/// canonical SuperRoot (not a placeholder): the book's `placeSellOffer` recomputes
-/// the TC address from `(sellerPubkey, nonce)` pinned to that RootModel, so the
-/// deployed TC must sit at the matching address or the offer reverts.
-pub async fn plan_token_contract(
+/// Constructor arguments do not enter a StateInit and so do not enter the
+/// address. They are supplied anyway because `encode_message` will not encode a
+/// deploy without them; only `.address` of the result is used, and the message
+/// it signs is thrown away.
+pub async fn canonical_deal_address(
     ctx: Arc<ClientContext>,
     seller_pubkey_hex: &str,
     seller_note_addr: &str,
     nonce: u64,
-    deal: TokenDeal,
+    deal: &TokenDeal,
     deploy_keys: KeyPair,
-) -> anyhow::Result<TokenContractDeploy> {
+) -> anyhow::Result<String> {
     let pubkey = format!("0x{}", seller_pubkey_hex.trim_start_matches("0x"));
-    let abi = Abi::Json(TOKEN_CONTRACT_ABI.to_string());
     let root_model_addr = canonical_root_model_address(ctx.clone(), &pubkey).await?;
+    let deposit_hash = PrivateNote::new(ctx.clone(), dex_contract_params(seller_note_addr))
+        .get_deposit_identifier_hash()
+        .await
+        .map_err(|e| anyhow!("read _depositIdentifierHash of {seller_note_addr}: {e:?}"))?
+        .deposit_identifier_hash;
 
     let deploy_set = DeploySet {
         tvc: Some(base64::engine::general_purpose::STANDARD.encode(TOKEN_CONTRACT_TVC)),
@@ -266,8 +276,9 @@ pub async fn plan_token_contract(
         state_init: None,
         workchain_id: Some(0),
         initial_data: Some(json!({
-            // ABI >= 2.4 requires the contract pubkey in initial_data; it matches
-            // the deploy signer (the note key) so the deploy message verifies.
+            // ABI >= 2.4 requires the contract pubkey in initial_data. The deal
+            // pins the seller key as both its `pubkey` and its `_sellerPubkey`
+            // static, exactly as `buildTokenContractStateInit` does.
             "_pubkey": pubkey,
             "_sellerPubkey": pubkey,
             "_rootModelAddress": root_model_addr,
@@ -281,120 +292,115 @@ pub async fn plan_token_contract(
         header: None,
         input: Some(json!({
             "modelName": deal.model_name,
-            // The ctor verifies `sha256(modelName) == modelHash`, so bind the hash
-            // to the name's preimage — otherwise the deploy reverts and the TC is
-            // never funded.
             "modelHash": model_hash_dec(&deal.model_name),
             "pricePerTick": deal.price_per_tick.to_string(),
             "maxTicks": deal.max_ticks.to_string(),
             "sellerNote": seller_note_addr,
+            "depositIdentifierHash": deposit_hash,
         })),
     };
 
-    // Derive the deterministic deploy address (address: None) so whoever pays
-    // for the account can fund it before the constructor runs.
     let encoded = encode_message(
-        ctx.clone(),
+        ctx,
         ParamsOfEncodeMessage {
-            abi,
+            abi: Abi::Json(TOKEN_CONTRACT_ABI.to_string()),
             address: None,
-            deploy_set: Some(deploy_set.clone()),
-            call_set: Some(ctor.clone()),
-            signer: Signer::Keys { keys: deploy_keys.clone() },
+            deploy_set: Some(deploy_set),
+            call_set: Some(ctor),
+            signer: Signer::Keys { keys: deploy_keys },
             processing_try_index: None,
             signature_id: None,
         },
     )
     .await
-    .map_err(|e| anyhow!("encode TokenContract deploy: {e:?}"))?;
+    .map_err(|e| anyhow!("derive TokenContract address: {e:?}"))?;
 
-    Ok(TokenContractDeploy { address: encoded.address, deploy_set, ctor, keys: deploy_keys })
+    Ok(encoded.address)
 }
 
-impl TokenContractDeploy {
-    /// Send the constructor to an address that is already funded, and wait for
-    /// the account to come alive.
-    ///
-    /// Nothing here pays for the account: the caller has already put SHELL on
-    /// the address by whatever route it chose. If none arrived, the deploy
-    /// message has nothing to activate and this reports the wait that failed.
-    pub async fn send(self, ctx: Arc<ClientContext>) -> anyhow::Result<String> {
-        let tc = TokenContract::new(ctx, self_rooted_contract_params(self.address.clone()));
-        tc.send_message(Some(self.ctor), Some(self.deploy_set), Signer::Keys { keys: self.keys })
-            .await
-            .map_err(|e| anyhow!("deploy TokenContract {}: {e:?}", self.address))?;
-        tc.wait_account(ParamsOfWaitAccount {
-            status: AccountStatus::Active,
-            attempts: Some(40),
-            attempts_timeout: Some(2_000),
-        })
-        .await
-        .map_err(|e| anyhow!("wait TokenContract {} active: {e:?}", self.address))?;
-        Ok(self.address)
-    }
-}
-
-/// Deploy a standalone `TokenContract` off the shared giver and return its
-/// address.
+/// Deploy the seller's deal from its own note and wait for it to come alive.
 ///
-/// This is the ordinary route for a test that just needs a deal contract to
-/// exist. The note-funded route the contracts are actually designed around —
-/// `PrivateNote.fundDeployShell` — is exercised on its own in
-/// `e2e_inference_funding`.
-pub async fn deploy_token_contract(
-    ctx: Arc<ClientContext>,
-    seller_pubkey_hex: &str,
+/// No giver anywhere: the note pays the reserve out of its own SHELL. The
+/// deploy is `bounce: false` — there is no account at the target yet — so a
+/// refusal surfaces only as an address that never goes Active, which is why the
+/// timeout below carries a diagnosis rather than just a timeout.
+pub async fn deploy_deal_from_note(
+    dex: &dodex_chain::Dex,
     seller_note_addr: &str,
+    seller_pubkey_hex: &str,
     nonce: u64,
     deal: TokenDeal,
     deploy_keys: KeyPair,
 ) -> anyhow::Result<String> {
-    let plan = plan_token_contract(
+    let ctx = dex.context();
+    let address = canonical_deal_address(
         ctx.clone(),
         seller_pubkey_hex,
         seller_note_addr,
         nonce,
-        deal,
-        deploy_keys,
+        &deal,
+        deploy_keys.clone(),
     )
     .await?;
 
-    // Create + fund the address under its own dApp (self-rooted). Native value
-    // would not cross the dApp boundary, so the giver credit goes as ECC SHELL
-    // with flag 16 (lands as native gas). Shellnet's giver can drop a message
-    // under load (BM ~3 RPS), so re-send until the account exists.
-    let tc = TokenContract::new(ctx.clone(), self_rooted_contract_params(plan.address.clone()));
-    let mut landed = false;
-    for attempt in 1..=3 {
-        let mut ecc = HashMap::new();
-        ecc.insert(SHELL_CURRENCY_ID, CREATION_SHELL);
-        send_currency_with_flag_from_default_giver(ctx.clone(), &plan.address, 0, ecc, 16)
-            .await
-            .map_err(|e| anyhow!("giver fund TokenContract {}: {e:?}", plan.address))?;
-        match tc
-            .wait_account(ParamsOfWaitAccount {
-                status: AccountStatus::Uninit,
-                attempts: Some(30),
-                attempts_timeout: Some(2_000),
-            })
-            .await
-        {
-            Ok(_) => {
-                landed = true;
-                break;
-            }
-            Err(e) => {
-                eprintln!(
-                    "[deploy_token_contract] giver credit attempt {attempt} not landed: {e:?}"
-                )
-            }
-        }
-    }
-    if !landed {
-        return Err(anyhow!("giver credit never landed on {} after retries", plan.address));
-    }
+    dex.deploy_deal(
+        seller_note_addr,
+        ParamsOfDeployDeal {
+            nonce,
+            model_name: deal.model_name.clone(),
+            // The ctor verifies `sha256(modelName) == modelHash`, so bind the
+            // hash to the name's preimage or the deploy reverts.
+            model_hash: model_hash_dec(&deal.model_name),
+            price_per_tick: deal.price_per_tick,
+            max_ticks: deal.max_ticks,
+            gas_reserve: deal_gas_reserve(deal.max_ticks),
+        },
+        Signer::Keys { keys: deploy_keys },
+    )
+    .await
+    .map_err(|e| anyhow!("deployDeal from {seller_note_addr}: {e:?}"))?;
 
-    plan.send(ctx).await
+    let tc = TokenContract::new(ctx, dex_contract_params(address.clone()));
+    if let Err(err) = tc
+        .wait_account(ParamsOfWaitAccount {
+            status: AccountStatus::Active,
+            attempts: Some(45),
+            attempts_timeout: Some(2_000),
+        })
+        .await
+    {
+        return Err(anyhow!(
+            "the deal never came up at {address}: {err:?}; {}",
+            diagnose_dead_deal(dex, &address).await
+        ));
+    }
+    Ok(address)
+}
+
+/// Name the reason a deal never came up, from the one observable a
+/// `bounce: false` deploy leaves behind: the account's code hash.
+async fn diagnose_dead_deal(dex: &dodex_chain::Dex, address: &str) -> String {
+    let account = match dex.dex_account_shell(address).await {
+        Ok(account) => account,
+        Err(err) => return format!("account unreadable: {err:?}"),
+    };
+    let acc_type = &account.acc_type;
+    match account.code_hash.as_deref() {
+        // Same failure the book has, one contract along. RootPN.onCodeUpgrade
+        // calls tvm.resetStorage() and restores only 6 codes; `_tokenContractCode`
+        // is set separately, so every RootPN upgrade wipes it and every note
+        // minted afterwards bakes an empty deal code.
+        Some(hash) if hash == EMPTY_CELL_HASH => format!(
+            "the account exists (acc_type={acc_type}, {} native, {} shell) but was deployed with              an EMPTY code cell, so no constructor ever ran. The note's baked              `_tokenContractCode` is empty — RootPN was never given setTokenContractCode, or an              updateCode wiped it and it was not re-run",
+            account.native, account.shell
+        ),
+        Some(hash) => format!(
+            "the account runs code {hash} (acc_type={acc_type}) — something is deployed there, it              just is not answering"
+        ),
+        None => format!(
+            "nothing was created at the address (acc_type={acc_type}): the note never sent the              deploy. `deployDeal` is owner-gated and refuses a note that has withdrawn, and the              deploy itself is bounce:false, so a refusal leaves no other trace"
+        ),
+    }
 }
 
 /// Fetch the routing ids of the external events an `InferenceOrderBook` emitted.

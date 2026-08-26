@@ -4,20 +4,20 @@
 // Flow (self-trade — one note is both maker and taker, like the reference
 // `test_inference_events`):
 //   1. note deploys the per-model InferenceOrderBook (internal message);
-//   2. a standalone TokenContract is deployed externally + giver-funded (the
-//      seller's per-deal escrow the offer points at);
+//   2. the same note deploys its own deal TokenContract (`deployDeal`), which
+//      is the seller's per-deal escrow the offer points at;
 //   3. the note posts a SELL offer backed by that TokenContract;
 //   4. the note places a crossing BUY ⇒ the book matches and forwards the
 //      SHELL to TokenContract.fundFromOrderBook;
 //   5. assert the TokenContract is now funded and bound to the buyer note.
 //
 // This exercises the seller path + the matching engine + the TokenContract
-// settlement decoders against a live contract. The TokenContract is deployed by
-// an external message, so it is self-rooted (its `dapp_id` == its own account
-// id) and funded with ECC SHELL via flag 16 — native value does not cross a
-// dApp boundary on Acki Nacki (see `common::airegistry::deploy_token_contract`).
-// The streaming settlement (open/advance/stop) and probe model need timed
-// windows (600-1200s at these prices) and are covered separately.
+// settlement decoders against a live contract. There is no giver in the run:
+// since contracts 4.0.36 the deal is deployed by the note as an internal
+// message and lands in the note's own dApp, and the note pays its gas reserve
+// out of its own SHELL (see `common::airegistry::deploy_deal_from_note`). The
+// streaming settlement (open/claim/close) needs timed windows and is covered
+// separately.
 //
 //   cargo test -p dodex-api --test e2e_inference_match -- --ignored --nocapture
 //
@@ -31,7 +31,7 @@ use std::time::UNIX_EPOCH;
 
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
-use common::airegistry::deploy_token_contract;
+use common::airegistry::deploy_deal_from_note;
 use common::airegistry::wait_inference_book_live;
 use common::airegistry::wait_sell_offer_rested;
 use common::airegistry::TokenDeal;
@@ -111,17 +111,17 @@ async fn inference_offer_matches_buy_and_funds_token_contract() {
     eprintln!("[e2e_match] order_book={ob}");
     wait_book_live(&dex, &ob).await;
 
-    // 2. Deploy the seller's TokenContract externally (giver-funded). Self-trade
-    //    ⇒ seller pubkey/note are this note; the root model is the canonical one
-    //    the live SuperRoot derives, since the address must match what the note
-    //    and the book recompute. postSellOffer addresses the TC by
-    //    (seller key, nonce), so the offer must pass the SAME nonce it was
-    //    deployed with.
+    // 2. The note deploys its own deal TokenContract. Self-trade ⇒ seller
+    //    pubkey/note are this note; the root model is the canonical one the live
+    //    SuperRoot derives, since the address the harness watches must match the
+    //    one the note derives internally and the book recomputes. postSellOffer
+    //    addresses the deal by (seller key, nonce), so the offer must pass the
+    //    SAME nonce it was deployed with.
     let nonce = (suffix % 1_000_000_000) as u64 + 1;
-    let tc = deploy_token_contract(
-        dex.context(),
-        &note.owner_public_key_hex,
+    let tc = deploy_deal_from_note(
+        &dex,
         &note.address,
+        &note.owner_public_key_hex,
         nonce,
         TokenDeal {
             model_name: model_name.clone(),
@@ -131,7 +131,7 @@ async fn inference_offer_matches_buy_and_funds_token_contract() {
         keys.clone(),
     )
     .await
-    .expect("deploy TokenContract");
+    .expect("deployDeal from the seller note");
     eprintln!("[e2e_match] token_contract={tc}");
 
     // 3. Seller posts a SELL offer backed by the TokenContract.
