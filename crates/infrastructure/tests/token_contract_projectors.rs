@@ -612,6 +612,21 @@ async fn unknown_token_contract_event_returns_unknown() {
 
 /// Run a full first cycle — funded, opened, one finalized tick, stopped — and
 /// leave it committed. Shared by the two deal-reuse tests below.
+/// The per-cycle columns a cycle reset has to clear, in the order the query
+/// below selects them. Named because the tuple is nine wide and `sqlx` needs the
+/// annotation to pick a decoder.
+type CycleColumns = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<chrono::DateTime<chrono::Utc>>,
+    Option<chrono::DateTime<chrono::Utc>>,
+    Option<String>,
+    Option<bool>,
+    Option<chrono::DateTime<chrono::Utc>>,
+    i32,
+);
+
 async fn commit_first_cycle(pool: &PgPool, tc: &str) {
     sqlx::query("delete from inference_deals where token_contract_address=$1")
         .bind(tc)
@@ -681,25 +696,16 @@ async fn a_second_funding_starts_a_new_cycle() {
     .await;
     tx.commit().await.unwrap();
 
-    let (buyer, deposit, ppt, opened, settled, kind, clean, disputed, ticks): (
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<chrono::DateTime<chrono::Utc>>,
-        Option<chrono::DateTime<chrono::Utc>>,
-        Option<String>,
-        Option<bool>,
-        Option<chrono::DateTime<chrono::Utc>>,
-        i32,
-    ) = sqlx::query_as(
-        "select buyer_note, deposit::text, price_per_tick::text, opened_at_chain, \
+    let (buyer, deposit, ppt, opened, settled, kind, clean, disputed, ticks): CycleColumns =
+        sqlx::query_as(
+            "select buyer_note, deposit::text, price_per_tick::text, opened_at_chain, \
          settled_at_chain, close_kind, clean_settlement, disputed_at_chain, finalized_ticks \
          from inference_deals where token_contract_address=$1",
-    )
-    .bind(tc)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+        )
+        .bind(tc)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
     assert_eq!(
         buyer.as_deref(),
