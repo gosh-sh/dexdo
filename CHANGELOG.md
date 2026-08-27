@@ -2,6 +2,22 @@
 
 All notable changes to DEX.DO are recorded here. Entries are date-based, newest first.
 
+## [2026-08-27]
+
+### Fixed
+
+- **A deal no longer strands the notes that were party to it.** `TokenContract.cleanupUnopened` now tells both notes it is over (`PrivateNote.onDealClosed`), clears the endpoint ciphertext it was holding for the refunded buyer, and neither `fundFromOrderBook` nor `onSellClosed` charges the deal's gas reserve any more — a charge could revert the whole transaction and leave the `_offerPosted` latch set on a deal the book had already taken the ask from, with no retry.
+- **A buyer can no longer undo a matched deal on demand.** The note's wind-down path is gone: the deal could not tell a buyer who *cannot* post the bond from one who changed his mind, since both arrive with `_buyerBondFunded` false. `MATCH_OPEN_TIMEOUT` recovers the seller's money instead.
+
+### Added
+
+- `PrivateNote.fundBuyerBondNow(tokenContract, bond)` — posts the buyer's `2P` bond to a deal the note could not bond at match time, reopening the window before `MATCH_OPEN_TIMEOUT`. No SDK wrapper yet; the automatic path from `onInferenceFilled` is unchanged.
+
+### Changed
+
+- **Contracts re-pinned to the build deployed on shellnet.** `TOKEN_CONTRACT_CODE_HASH → 0xee4105b4…`, `ROOT_MODEL_CODE_HASH → 0xe92a14cb…`, and `PrivateNote`/`RootPN`/`SuperRoot`/`InferenceOrderBook`/`ModelRegistry` bytecode with them. The 2026-08-26 entry's hashes are superseded. A deal's address derives from these pins, so a client computing it from older artifacts looks at the wrong account.
+- **`PrivateNote.InferenceDealClosed` (external id 166) ends a deal's funding cycle.** It was ingested and projected as a no-op. The event names the deal in its payload — the sender is the note — and one close emits it from both notes, the second being inert. A wind-down that leaves the deal alive is now announced rather than inferred; the fresh-SELL-offer and `StreamFunded` signals stay as backstops for deals whose notes predate the update. See [indexer.md § Deal-address reuse](docs/tech-specs/indexer.md#deal-address-reuse).
+
 ## [2026-08-26]
 
 ### Breaking Changes
