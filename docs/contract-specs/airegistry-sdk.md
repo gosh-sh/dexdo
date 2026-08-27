@@ -91,7 +91,7 @@ are reached from the note or the giver, never from a signed external call.
 | `dispute` | `dispute` | — | Buyer contests the `claimed - trusted` delta (spec §4.2). |
 | `release_dispute` | `releaseDispute` | — | Buyer releases a dispute it raised. |
 | `resolve_dispute_timeout` | `resolveDisputeTimeout` | — | Seller resolves a dispute after the dispute window. |
-| `cleanup_unopened` | `cleanupUnopened` | — | Recover funds from a funded-but-unopened deal (seller no-show, §2.1). Residual native gas sweeps to the seller note, not to a fixed sink. Emits nothing — see [indexer.md § Deal-address reuse](../tech-specs/indexer.md#deal-address-reuse). |
+| `cleanup_unopened` | `cleanupUnopened` | — | Recover funds from a funded-but-unopened deal (no-show, §2.1). The deal SURVIVES: it returns to unfunded and can take a new offer. Residual native gas sweeps to the seller note, not to a fixed sink. It tells both notes through `onDealClosed`, so each emits `PrivateNote.InferenceDealClosed` — see [indexer.md § Deal-address reuse](../tech-specs/indexer.md#deal-address-reuse). |
 | `withdraw_shell` | `withdrawShell` | `ParamsOfWithdrawShell { amount }` | Seller withdraws finalized SHELL. |
 
 Not wrapped: `claimTokens`, `finalize`, `settleWeek`, `acceptProbe`,
@@ -178,9 +178,11 @@ on-chain.
 | `stream_cleanup` | `streamCleanup` | `ParamsOfStreamDeal { token_contract }` | Buyer note recovers a deal it funded and the seller never opened: refunds the whole deposit, returns the bond unslashed, destroys the deal. Scoped to the never-opened case by a permanent latch on the deal. |
 
 Not wrapped: `fundDeal`, the seller-note call that ships the deal its gas and
-the `2 * pricePerTick` mirror bond; and `creditFromDeal` / `creditFromBook` /
-`touchDeal` / `onDealClosed`, which are callbacks the deal and the book send
-back to the note.
+the `2 * pricePerTick` mirror bond; `fundBuyerBondNow`, the buyer's way back
+into a match whose bond his note could not cover at fill time (the bond
+otherwise goes out by itself from `onInferenceFilled`); and `creditFromDeal` /
+`creditFromBook` / `touchDeal` / `onDealClosed`, which are callbacks the deal
+and the book send back to the note.
 
 The three `stream_*` calls name the deal by **address**, not by the
 `(sellerPubkey, nonce)` pair the address derives from, so a wrong address is not
