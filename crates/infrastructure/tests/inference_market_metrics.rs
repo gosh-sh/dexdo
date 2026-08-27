@@ -66,9 +66,17 @@ async fn state_counts_and_staleness_reflect_inserted_rows() {
         .expect("insert discovering");
     // visible: reconciled, with a deliberately stale price (1000s) and sweep (500s).
     sqlx::query(
+        // The trading-rule columns are not decoration here. A row carrying
+        // `last_reconciled_at` with a NULL precision is what the read model
+        // calls `MarketInconsistent`, and it fails the WHOLE page rather than
+        // the row — so a bare fixture in this file 503s every unfiltered
+        // `/inference/markets` listing in suites that share this database.
         r#"insert into inference_markets
-               (orderbook_address, last_reconciled_at, reference_price_at, last_swept_at)
-           values ($1, now(), now() - interval '1000 seconds', now() - interval '500 seconds')"#,
+               (orderbook_address, last_reconciled_at, reference_price_at, last_swept_at,
+                platform_fee_bps, quote_token_type, price_precision, quantity_precision,
+                tick_size, step_size, min_notional)
+           values ($1, now(), now() - interval '1000 seconds', now() - interval '500 seconds',
+                   250, 2, 9, 0, '0.000000001', '1', '0.000000001')"#,
     )
     .bind(visible)
     .execute(&pool)
