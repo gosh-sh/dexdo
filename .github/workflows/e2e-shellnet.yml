@@ -85,17 +85,21 @@ jobs:
       # two seed_notes arrays concatenated; `--profile` is what tells the loader
       # which rows belong to which suite.
       #
-      # PN-INF is minted twenty-four deep, PN-API one, and the asymmetry is not
-      # an oversight. Every test picks its note as `notes[k % len]`, so a pool of
-      # one folds every index onto the same row — harmless while each binary is
-      # one-sided and the lane is single-threaded, which is what PN-API still is.
-      # `e2e_inference_stream` is not: it is a deal between a seller (index 19)
-      # and a buyer (index 20) that exists to prove the indexer tells the two
-      # apart, and `19 % 1 == 20 % 1` would hand it one note and turn the
-      # scenario back into the self-trade it was written to stop being. The
-      # count matches `INFERENCE_NOTES_FOR_ONE_EACH` in
-      # `services/api/tests/pn_pool_split.rs`, which carries the index map and
-      # guards the woodpecker spec against the same folding.
+      # ONE OF EACH HERE, twenty-four in the woodpecker spec, and the two counts
+      # are answering different questions. Every test picks its note as
+      # `notes[k % len]`, so a pool of one folds every index onto the same row.
+      # That is harmless in THIS lane: it runs `--test-threads 1` (see below)
+      # and every inference binary here is a self-trade, one note playing both
+      # sides, so there is no second party for a distinct row to be. The stand
+      # is what needs twenty-four — it runs four tests at once, and there the
+      # count costs nothing because the zerostate bakes the pool from
+      # `tests/e2e/dex_test_notes.spec.json` offline.
+      #
+      # Here it is not free: this step MINTS notes live on shellnet, one deploy
+      # at a time. Twenty-four of them ran the job into its 120-minute timeout
+      # (run 441) without reaching a single test, while one has been minting in
+      # about a minute all along. Raise this only together with the timeout, and
+      # only for a scenario that genuinely needs two parties.
       - name: Mint fresh e2e seed notes
         working-directory: sdk
         run: |
@@ -104,14 +108,14 @@ jobs:
             --endpoint "$E2E_NETWORK_ENDPOINT" \
             --output "$RUNNER_TEMP/pn_pool_api.json"
           cargo run --release --bin mint_pn_pool -- \
-            --count 24 --nominal N10000 --token-type shell --profile PN-INF \
+            --count 1 --nominal N10000 --token-type shell --profile PN-INF \
             --endpoint "$E2E_NETWORK_ENDPOINT" \
             --output "$RUNNER_TEMP/pn_pool_inf.json"
           jq -s 'add' \
             "$RUNNER_TEMP/pn_pool_api.seed_notes.json" \
             "$RUNNER_TEMP/pn_pool_inf.seed_notes.json" \
             > "$GITHUB_WORKSPACE/tests/fixtures/seed_notes.json"
-          test "$(jq 'length' "$GITHUB_WORKSPACE/tests/fixtures/seed_notes.json")" = 25
+          test "$(jq 'length' "$GITHUB_WORKSPACE/tests/fixtures/seed_notes.json")" = 2
           jq -r '.[] | "minted \(.profile) tokenType=\(.tokenType) \(.pn_address)"' \
             "$GITHUB_WORKSPACE/tests/fixtures/seed_notes.json"
 
@@ -140,11 +144,11 @@ jobs:
         run: |
           seed="$GITHUB_WORKSPACE/tests/fixtures/seed_notes.json"
           [ -s "$seed" ] || { echo "no seed note to drain — skip"; exit 0; }
-          # Every row, not just the first: the file holds one PN-API note and
-          # twenty-four PN-INF ones, and every key in it is in the clear.
-          # Draining only row 0 would leave the other twenty-four spendable by
-          # anyone who read the log — the loop is what keeps that from scaling
-          # with the pool.
+          # Every row, not just the first: the file holds one note per profile
+          # and every key in it is in the clear. Draining only row 0 would leave
+          # the others spendable by anyone who read the log. The loop is written
+          # over the whole file rather than over a known count, so it keeps
+          # holding if the mint above ever grows a pool.
           for i in $(jq -r 'to_entries[].key' "$seed"); do
             jq --argjson i "$i" \
               '{pn_address: .[$i].pn_address, owner_public_key_hex: .[$i].pn_pubkey_hex, owner_secret_key_hex: .[$i].pn_seckey_hex}' \
