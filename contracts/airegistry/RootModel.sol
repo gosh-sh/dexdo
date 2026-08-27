@@ -18,7 +18,7 @@ contract RootModel is AiRegistryModifiers {
     ///         specific TokenContract bytecode. To bump versions, rebuild
     ///         TokenContract, recompute the hash below, recompile
     ///         RootModel, and redeploy.
-    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0x4378e271b51b6670bac6a2db43df00a042f82428b7a75fe01780b58b889c7680;
+    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0xee4105b4800d852dde1a86cec4e270ecfa2ae0e199f05a46823aed792933e711;
     uint16  constant TOKEN_CONTRACT_CODE_DEPTH = 18;
 
     event ContractDeployed(address self);

@@ -83,7 +83,7 @@ contract TokenContract is AiRegistryModifiers {
     // book hash is authoritative — the TC needs no RootPN round-trip. The note does
     // NOT pin the TC code (RootPN bakes it into the note at deploy), so this pin is
     // one-way (TC->note) and the build stays cycle-free. Re-pin when PrivateNote is rebuilt.
-    uint256 constant PRIVATE_NOTE_CODE_HASH  = 0xf7a4960153fdfe15ef00c9b73597d87ade999fd86b6463a4244fce5ffd8e4aa2;
+    uint256 constant PRIVATE_NOTE_CODE_HASH  = 0xacf19e140b58469a50165bcbda88cca952b2036678f1f5823b6a6bebd3fc32b1;
     uint16  constant PRIVATE_NOTE_CODE_DEPTH = 20;
 
     // Native value attached to THIS contract's messages (register / stream-lock / payout).
@@ -723,7 +723,12 @@ contract TokenContract is AiRegistryModifiers {
         }
         tvm.accept();
         ensureBalance();
-        _chargeGas(GAS_FUND_FROM_BOOK);
+        // NOT CHARGED, and it must stay that way. This is the BOOK telling the deal what
+        // happened to its offer, not a party doing something: nobody here chose to call, and
+        // the book attaches no ECC anywhere. A charge would make clearing `_offerPosted` depend
+        // on the reserve, and `burnecc` fails in the ACTION phase — the whole transaction
+        // reverts, the latch stays set, and the book has already removed the ask. Reordering
+        // the statements cannot help: a revert takes the clearing with it.
         // Credited BEFORE the non-fundable branch below, which refunds through `_payShell` and
         // therefore subtracts it again. Both halves go through the balance, so the pair with the
         // book conserves whichever way this call ends.
@@ -828,7 +833,9 @@ contract TokenContract is AiRegistryModifiers {
         }
         tvm.accept();
         ensureBalance();
-        _chargeGas(GAS_LIGHT);
+        // NOT CHARGED — same reason as `fundFromOrderBook`, and worse here: the book sends this
+        // with `bounce: false`, so a reverted transaction is never retried and the latch would
+        // stay set for good, leaving the deal unable to re-list, close or be destroyed.
         if (_funded) { return; }        // a fill won the race → deal is live, keep the TC
         // Offer is off the book → re-list-able. AND THAT IS ALL THIS DOES NOW.
         //
@@ -2028,6 +2035,11 @@ contract TokenContract is AiRegistryModifiers {
         // block both ways out of the state this call creates — `postFromNote` returns early on
         // `_offerPosted`, and `destroy` refuses on it.
         _offerPosted = false;
+        // The endpoint ciphertext goes with the cycle it belonged to. It was encrypted FOR THE
+        // BUYER being refunded here, so leaving it in storage means the next buyer of this same
+        // deal is handed a stream he cannot decrypt — and `open` emits it without complaint if
+        // the seller passes an empty value, because an empty optional means "unchanged".
+        delete _endpointCipher;
 
         _payShell(_buyer, refund);
         _payShell(_sellerNote, bondBack);   // return the seller's bond (no-show, not slashed)
@@ -2053,6 +2065,18 @@ contract TokenContract is AiRegistryModifiers {
         // In the ordinary flow this zeroes nothing: the two payouts above cleared the deposit and
         // the bond, so `_balance` is zero and only a bounced credit could leave a remainder.
         if (_balance > 0) { _burnShell(_balance); }
+        // BOTH NOTES MUST STOP COUNTING THIS DEAL AS LIVE. `onInferenceFilled` set
+        // `_liveDeals[deal]` on the buyer's note AND on the seller's — the book reports a fill
+        // to both — and `withdrawTokens` refuses while that map is non-empty. Until this call
+        // the clearing came free with `_die`; now that the deal survives, it has to be said out
+        // loud, or a fully refunded buyer and a seller who got his bond back both sit unable to
+        // withdraw until someone destroys a deal that is no longer in anyone's way.
+        if (_buyer.value != 0) {
+            IInferenceNoteMirror(_buyer).onDealClosed{value: DAPP_MSG_VALUE, flag: 1, bounce: false}();
+        }
+        if (_sellerNote.value != 0) {
+            IInferenceNoteMirror(_sellerNote).onDealClosed{value: DAPP_MSG_VALUE, flag: 1, bounce: false}();
+        }
         // Residual NATIVE gas goes to the seller's note, which is where the deal's gas came from in
         // the note-funded flow — `fundDeal` sends it from there. This used to be the fixed SuperRoot
         // sink, guarding against an aimable payee on a call anyone may make after the timeout; that

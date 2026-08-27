@@ -771,26 +771,14 @@ contract PrivateNote is Modifiers, ReplayProtection {
                 IInferenceDeal(tokenContract).fundBuyerBond{
                     value: 0.05 vmshell, flag: 1, bounce: true, currencies: ecc
                 }(bond);
-            } else {
-                // NO BOND MEANS THE DEAL IS ALREADY DEAD — say so instead of going quiet. `open`
-                // requires `_buyerBondFunded`, so a match this note cannot bond can never become a
-                // stream; staying silent left the seller's deposit and bond sitting in a deal that
-                // would only be recoverable after the no-show timeout, and left nothing on chain
-                // saying why. Winding it down here returns his money at once.
-                //
-                // Attach what pays for that call: the terminal charge, or everything this note has
-                // if that is less — a note holding nothing still gets the deal wound down, because
-                // `cleanupUnopened` burns what arrives rather than charging the reserve.
-                //
-                // `bounce: false`: the deal may already be gone by another path, and there is no
-                // figure to bring home — the bond was never deducted on this branch.
-                mapping(uint32 => varuint32) ecc;
-                uint128 pay = held >= DEAL_GAS_TERMINAL ? DEAL_GAS_TERMINAL : held;
-                if (pay > 0) { ecc[CURRENCIES_ID_SHELL] = varuint32(pay); }
-                IInferenceDeal(tokenContract).cleanupUnopened{
-                    value: 0.05 vmshell, flag: 1, bounce: false, currencies: ecc
-                }();
             }
+            // NOT ENOUGH FOR THE BOND: nothing is sent, and that is the whole of it. Winding the
+            // deal down from here was tried and taken out: this note cannot tell the deal anything
+            // it does not already know, and the deal cannot tell a note that CANNOT bond from an
+            // owner who simply changed his mind — both arrive from `_buyer` with `_buyerBondFunded`
+            // still false. Letting the message through therefore handed every buyer a way to undo
+            // a matched deal on demand. `MATCH_OPEN_TIMEOUT` recovers the seller's money instead,
+            // and `fundBuyerBondNow` below lets the owner post the bond late, once the note has it.
         }
     }
 
@@ -1021,6 +1009,46 @@ contract PrivateNote is Modifiers, ReplayProtection {
         // No figure moves here: a bounce returns the value and there is nothing to correct.
         InferenceOrderBook(orderBook).cancelAllOrders{value: 1 vmshell, flag: 1, bounce: true}();
     }
+
+    /// @notice Post the buyer's bond to a matched deal this note could not bond at match time.
+    /// @dev    The bond normally goes out by itself, from `onInferenceFilled`, the moment the book
+    ///         reports a fill. It does not when the note's recorded balance is short of `2P` right
+    ///         then — a deposit still arriving, a figure spent on another order — and the match is
+    ///         left waiting: `open` refuses without `_buyerBondFunded`, and after
+    ///         `MATCH_OPEN_TIMEOUT` anyone may unwind the deal and hand the seller his money back.
+    ///
+    ///         This is the way back into that window, and it is the ONLY thing this note may do
+    ///         about a bond it missed. Winding the deal down from here was tried and taken out:
+    ///         the deal cannot tell a note that CANNOT bond from an owner who changed his mind —
+    ///         both arrive from `_buyer` with `_buyerBondFunded` still false — so letting that
+    ///         message through handed every buyer a way to undo a matched deal on demand.
+    ///
+    ///         Conditions are enforced where they belong: the deal refuses a second bond
+    ///         (`_buyerBondFunded`), an opened stream (`_opened`), and a sender that is not its
+    ///         buyer. Nothing here can talk another note's deal into anything.
+    ///
+    ///         `bounce: true`, like the automatic path: if the deal refuses, the figure must come
+    ///         home rather than be recorded as spent against a bond that was never taken.
+    /// @param tokenContract The matched deal, as reported to this note by the book.
+    /// @param bond          `2 * clearingPrice` of that match.
+    function fundBuyerBondNow(address tokenContract, uint128 bond)
+        public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg
+    {
+        ensureBalance();
+        require(!_hasWithdrawn, ERR_INVALID_STATE);
+        require(bond > 0, ERR_INVALID_PARAMS);
+        require(_liveDeals.exists(tokenContract), ERR_INVALID_PARAMS);
+        require(_balance[CURRENCIES_ID_SHELL] >= bond, ERR_LOW_VALUE);
+        _balance[CURRENCIES_ID_SHELL] -= bond;
+        mapping(uint32 => varuint32) ecc;
+        if (uint128(address(this).currencies[CURRENCIES_ID_SHELL]) >= DEAL_GAS_FUND) {
+            ecc[CURRENCIES_ID_SHELL] = varuint32(DEAL_GAS_FUND);
+        }
+        IInferenceDeal(tokenContract).fundBuyerBond{
+            value: 0.05 vmshell, flag: 1, bounce: true, currencies: ecc
+        }(bond);
+    }
+
 
     /// @notice Buyer note stops the stream — amicable exit (spec §4.1). Max loss
     ///         is the two in-flight ticks; refund returns to this note.

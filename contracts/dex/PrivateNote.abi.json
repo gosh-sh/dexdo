@@ -167,6 +167,15 @@
 			]
 		},
 		{
+			"name": "fundBuyerBondNow",
+			"inputs": [
+				{"name":"tokenContract","type":"address"},
+				{"name":"bond","type":"uint128"}
+			],
+			"outputs": [
+			]
+		},
+		{
 			"name": "streamStop",
 			"inputs": [
 				{"name":"tokenContract","type":"address"}
