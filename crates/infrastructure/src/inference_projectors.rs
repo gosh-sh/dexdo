@@ -205,14 +205,17 @@ async fn apply_inference_order_placed(
     )
     .await?;
 
-    // A FRESH SELL ON A FUNDED DEAL MEANS THE PREVIOUS MATCH IS OVER, and it is
-    // the only thing on chain that says so. Since contracts 4.0.36 a buyer
-    // no-show runs `cleanupUnopened`, which no longer destroys the deal — and
-    // emits nothing at all: no `ContractDestroyed`, and no
-    // `PrivateNote.InferenceDealClosed` either, since that fires only when a
-    // deal dies. Without this the row would keep the dead match's buyer and
-    // deposit and read as "funded, never opened" until the deal is funded
-    // again, which may never happen.
+    // A FRESH SELL ON A FUNDED DEAL MEANS THE PREVIOUS MATCH IS OVER. Since
+    // contracts 4.0.36 a buyer no-show runs `cleanupUnopened`, which no longer
+    // destroys the deal, so the row would otherwise keep the dead match's buyer
+    // and deposit and read as "funded, never opened".
+    //
+    // This used to be the ONLY thing on chain that said so, because that call
+    // emitted nothing. It is not any more: the 4.0.36 update has the deal tell
+    // both notes (`onDealClosed`), and each note emits
+    // `PrivateNote.InferenceDealClosed` — projected in `projectors.rs` and now
+    // the direct signal. This one stays as the backstop, and it is the one that
+    // covers a deal whose notes were minted before that update.
     //
     // The inference is sound rather than merely plausible: `postFromNote` opens
     // with `if (_offerPosted || _funded) { return; }`, and a funded deal never

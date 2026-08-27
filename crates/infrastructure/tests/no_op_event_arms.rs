@@ -26,7 +26,13 @@ use sqlx::PgPool;
 /// none of these are in `IGNORABLE_EVENT_TYPES` — that list is permission to
 /// drop an event at ingest, before `raw_events` is written, and dropping these
 /// would cut rewards off from the payload it settles on.
-const UNPERSISTED_DEX_EVENTS: [&str; 9] = [
+///
+/// `PrivateNote.InferenceDealClosed` was here and is not any more: the 4.0.36
+/// contract update made `cleanupUnopened` announce itself through both notes,
+/// which turned the event into the direct signal that a deal's funding cycle is
+/// over. It now writes, so it belongs to
+/// `crates/infrastructure/tests/token_contract_projectors.rs` instead.
+const UNPERSISTED_DEX_EVENTS: [&str; 8] = [
     "PMP.StakeForfeited",
     "PrivateNote.StakeForfeitConfirmed",
     "PrivateNote.StakeDroppedLocally",
@@ -34,7 +40,6 @@ const UNPERSISTED_DEX_EVENTS: [&str; 9] = [
     "PrivateNote.BookCredited",
     "PrivateNote.InferenceOrderRemoved",
     "PrivateNote.InferenceOrderRejectedMirror",
-    "PrivateNote.InferenceDealClosed",
     "RootPN.DealWriteOffReported",
 ];
 

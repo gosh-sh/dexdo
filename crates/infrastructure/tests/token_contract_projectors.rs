@@ -35,6 +35,17 @@ fn iob_ev(event_name: &str, value: serde_json::Value) -> DecodedEvent {
     }
 }
 
+/// Build a PrivateNote DecodedEvent. The note is the SENDER of these — the deal
+/// they name is in the payload, not in `src`.
+fn pn_ev(event_name: &str, value: serde_json::Value) -> DecodedEvent {
+    DecodedEvent {
+        contract_kind: "PrivateNote",
+        event_name: event_name.to_string(),
+        event_type: format!("PrivateNote.{event_name}"),
+        value,
+    }
+}
+
 fn node(src: &str, chain_order: &str) -> EventNode {
     EventNode {
         msg_id: format!("m_{chain_order}"),
@@ -977,4 +988,129 @@ async fn the_offer_that_produced_the_match_does_not_end_its_cycle() {
     .unwrap();
     assert_eq!(buyer.as_deref(), Some("0:buyer1"), "a late in-cycle offer must change nothing");
     assert_eq!(kind.as_deref(), Some("STOPPED"), "a late in-cycle offer must not reopen a close");
+}
+
+/// `cleanupUnopened` hands a no-show's deposit back and keeps the deal. Since
+/// the 4.0.36 contract update it tells both notes, and each note says so on
+/// chain — so the cycle ends here rather than waiting for a re-listing that may
+/// never come.
+#[tokio::test]
+async fn a_notes_deal_closed_ends_an_unsettled_funding_cycle() {
+    let Some(pool) = setup().await else { return };
+    let tc = "0:tc_closed_unsettled";
+    sqlx::query("delete from inference_deals where token_contract_address=$1")
+        .bind(tc)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Funded and never opened: exactly the state `cleanupUnopened` runs on.
+    let mut tx = pool.begin().await.unwrap();
+    project(
+        &mut tx,
+        &ev("StreamFunded", serde_json::json!({"buyer":"0:buyer1","deposit":"5000"})),
+        &node(tc, "co-1"),
+    )
+    .await;
+    tx.commit().await.unwrap();
+
+    // The note reports the close. `src` is the NOTE; the deal is in the payload.
+    let mut tx = pool.begin().await.unwrap();
+    project(
+        &mut tx,
+        &pn_ev("InferenceDealClosed", serde_json::json!({"deal": tc})),
+        &node("0:buyer1", "co-2"),
+    )
+    .await;
+    tx.commit().await.unwrap();
+
+    let (buyer, deposit): (Option<String>, Option<String>) = sqlx::query_as(
+        "select buyer_note, deposit::text from inference_deals where token_contract_address=$1",
+    )
+    .bind(tc)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(buyer, None, "the wound-down match's buyer must not survive it");
+    assert_eq!(deposit, None, "nor its deposit — the deposit went back to the buyer");
+}
+
+/// The seller's note reports the same close, and finds the work done. One
+/// close produces two of these events, and the second must be inert rather than
+/// reach for a cycle that is already over.
+#[tokio::test]
+async fn the_second_note_reporting_the_same_close_changes_nothing() {
+    let Some(pool) = setup().await else { return };
+    let tc = "0:tc_closed_twice";
+    sqlx::query("delete from inference_deals where token_contract_address=$1")
+        .bind(tc)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    project(
+        &mut tx,
+        &ev("StreamFunded", serde_json::json!({"buyer":"0:buyer1","deposit":"5000"})),
+        &node(tc, "co-1"),
+    )
+    .await;
+    project(
+        &mut tx,
+        &pn_ev("InferenceDealClosed", serde_json::json!({"deal": tc})),
+        &node("0:buyer1", "co-2"),
+    )
+    .await;
+    project(
+        &mut tx,
+        &pn_ev("InferenceDealClosed", serde_json::json!({"deal": tc})),
+        &node("0:seller1", "co-3"),
+    )
+    .await;
+    tx.commit().await.unwrap();
+
+    let (buyer, order): (Option<String>, Option<String>) = sqlx::query_as(
+        "select buyer_note, last_chain_order from inference_deals where token_contract_address=$1",
+    )
+    .bind(tc)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(buyer, None);
+    assert_eq!(
+        order.as_deref(),
+        Some("co-2"),
+        "the second report ends nothing, so it must not advance the watermark either"
+    );
+}
+
+/// `_die` emits this too, on a deal that settled and was then destroyed. That
+/// row carries the settlement, and erasing it would turn a closed deal into a
+/// blank one — the read model would report nothing ever happened.
+#[tokio::test]
+async fn a_deal_closed_after_settling_keeps_its_record() {
+    let Some(pool) = setup().await else { return };
+    let tc = "0:tc_closed_settled";
+    commit_first_cycle(&pool, tc).await;
+
+    let mut tx = pool.begin().await.unwrap();
+    project(
+        &mut tx,
+        &pn_ev("InferenceDealClosed", serde_json::json!({"deal": tc})),
+        &node("0:buyer1", "co-9"),
+    )
+    .await;
+    tx.commit().await.unwrap();
+
+    let (buyer, deposit, kind): (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+        "select buyer_note, deposit::text, close_kind from inference_deals \
+         where token_contract_address=$1",
+    )
+    .bind(tc)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(buyer.as_deref(), Some("0:buyer1"), "a settled deal keeps its buyer");
+    assert_eq!(deposit.as_deref(), Some("5000"), "and its deposit");
+    assert_eq!(kind.as_deref(), Some("STOPPED"), "and the close that was recorded for it");
 }

@@ -97,8 +97,10 @@ pub async fn project_event(
         | "PrivateNote.BookCredited"
         | "PrivateNote.InferenceOrderRemoved"
         | "PrivateNote.InferenceOrderRejectedMirror"
-        | "PrivateNote.InferenceDealClosed"
         | "RootPN.DealWriteOffReported" => Ok(ProjectionOutcome::Applied),
+        "PrivateNote.InferenceDealClosed" => {
+            apply_inference_deal_closed(tx, event, node).await.with_context(context)
+        }
         et if et.starts_with("TokenContract.") => {
             crate::token_contract_projectors::project_token_contract_event(tx, event, node)
                 .await
@@ -1224,6 +1226,54 @@ fn node_unix_seconds(node: &EventNode) -> Option<i64> {
 /// `pending_row_to_inputs` pulls it out of the NOT NULL column. Bubble up as
 /// an error so the projector fails the row instead of silently writing a
 /// stale value.
+/// A note says one of the deals it was party to is over.
+///
+/// Emitted by `PrivateNote.onDealClosed`, which the deal calls on the buyer's
+/// note AND the seller's, so one close produces two of these; the second finds
+/// the work already done. `src` is the NOTE, and the deal is in the payload —
+/// this is the one deal projector that keys on a field rather than on the
+/// sender.
+///
+/// It is the DIRECT signal for a wind-down that leaves the deal alive.
+/// `cleanupUnopened` hands a no-show's deposit back and keeps the contract, and
+/// it used to do that silently: the boundary had to be inferred from the next
+/// SELL offer naming the deal, which never comes if the seller gives up on it.
+/// The 4.0.36 update made the deal tell both notes, and the notes say so on
+/// chain, so the inference is now the backstop rather than the only evidence.
+///
+/// NOT every close resets, though. `_die` emits this too, on a deal that
+/// settled and was then destroyed, and that row carries the settlement this
+/// would erase. A recorded close is what separates the two: `cleanupUnopened`
+/// fires with none, since it can only run on a deal that never opened. A deal
+/// destroyed without ever settling needs no separating — `end_funding_cycle`
+/// already declines to end a cycle that has no deposit.
+async fn apply_inference_deal_closed(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &DecodedEvent,
+    node: &EventNode,
+) -> anyhow::Result<ProjectionOutcome> {
+    let deal = field_str(&event.value, "deal")?;
+    let chain_order = node_chain_order(node, "InferenceDealClosed")?;
+
+    let settled = sqlx::query_scalar::<_, bool>(
+        r#"select true from inference_deals
+            where token_contract_address = $1
+              and (close_kind is not null or settled_at_chain is not null)"#,
+    )
+    .bind(deal)
+    .fetch_optional(&mut **tx)
+    .await
+    .context("check whether the closed deal recorded a settlement")?
+    .unwrap_or(false);
+
+    if settled {
+        debug!(deal, "deal closed after a settlement; leaving its record intact");
+        return Ok(ProjectionOutcome::Applied);
+    }
+    crate::token_contract_projectors::end_funding_cycle(tx, deal, &chain_order).await?;
+    Ok(ProjectionOutcome::Applied)
+}
+
 pub(crate) fn node_chain_order(node: &EventNode, event_label: &str) -> anyhow::Result<String> {
     node.msg_chain_order
         .clone()
