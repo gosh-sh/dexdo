@@ -31,6 +31,7 @@ const ABI_INFERENCE_ORDER_BOOK: &str =
 const ABI_TOKEN_CONTRACT: &str =
     include_str!("../../../contracts/airegistry/TokenContract.abi.json");
 const ABI_ROOT_MODEL: &str = include_str!("../../../contracts/airegistry/RootModel.abi.json");
+const ABI_SUPER_ROOT: &str = include_str!("../../../contracts/airegistry/SuperRoot.abi.json");
 
 const DEX_ABIS: &[(&str, &str)] = &[
     ("RootOracle", ABI_ROOT_ORACLE),
@@ -43,14 +44,26 @@ const DEX_ABIS: &[(&str, &str)] = &[
     ("Nullifier", ABI_NULLIFIER),
 ];
 
-/// `RootModel` is loaded for its two events alone, and specifically so that the
-/// `ContractDeployed` id it shares with `TokenContract` resolves by `dst` route
-/// instead of by "whichever ABI happens to be in the bundle" — see the route
-/// table in [`Decoder::new`].
+/// `RootModel` and `SuperRoot` are the registry side, and the read model has no
+/// table for either — they are loaded so their events DECODE, not so they can be
+/// projected. An event whose ABI is absent is stored with `event_type` NULL, and
+/// the projection loop only picks rows that carry one: `processed_at` stays NULL
+/// forever, which puts the row permanently out of reach of `prune_raw_events`
+/// (it deletes processed rows only). Their three ids — 700, 702, 703 — are all in
+/// `SCOPED_EVENT_IDS`, so the rows arrive whether or not anything can read them,
+/// and on stage they were the ENTIRE undecodable backlog.
+///
+/// `RootModel` carries a second reason: the `ContractDeployed` id it shares with
+/// `TokenContract` has to resolve by `dst` route rather than by "whichever ABI
+/// happens to be in the bundle" — see the route table in [`Decoder::new`].
+///
+/// `ModelRegistry` stays out because it declares no events at all, so loading it
+/// would change nothing.
 const INFERENCE_ABIS: &[(&str, &str)] = &[
     ("InferenceOrderBook", ABI_INFERENCE_ORDER_BOOK),
     ("TokenContract", ABI_TOKEN_CONTRACT),
     ("RootModel", ABI_ROOT_MODEL),
+    ("SuperRoot", ABI_SUPER_ROOT),
 ];
 
 #[derive(Debug, Clone, Serialize)]
@@ -289,10 +302,11 @@ mod tests {
         }
 
         // 57 DEX unique ids + 9 InferenceOrderBook ids + 15 TokenContract ids + 1 from
-        // RootModel = 82 distinct ids. RootModel carries two events but adds only one
-        // KEY: `TokenContractRegistered` is a new id, while `ContractDeployed` shares
-        // `TokenContract`'s and becomes a second entry under an id that already existed
-        // — which is the collision the 703/732 dst routes resolve. (The
+        // RootModel + 1 from SuperRoot = 83 distinct ids. RootModel carries two events
+        // but adds only one KEY: `TokenContractRegistered` is a new id, while
+        // `ContractDeployed` shares `TokenContract`'s and becomes a second entry under an
+        // id that already existed — which is the collision the 703/732 dst routes
+        // resolve. SuperRoot declares one event, `RootRegistered`, and it is unique. (The
         // InferenceOrderBook events carry an `Inference` prefix, so none collides with
         // the DEX OrderBook events.) The DEX side gained seven
         // PrivateNote events (DealCredited, BookCredited, InferenceOrderRemoved,
@@ -305,7 +319,7 @@ mod tests {
         // id without changing the count — a signature id is a hash of the name AND the
         // input types, so a reshaped event is a different id, not an extra one. Nothing
         // decodes the old id any more; rows carrying it stay undecoded.
-        assert_eq!(decoder.known_events(), 82, "unexpected total event id count");
+        assert_eq!(decoder.known_events(), 83, "unexpected total event id count");
 
         // sample lookups — find entries for PMP
         let pmp_event_ids: Vec<_> = decoder
@@ -326,8 +340,8 @@ mod tests {
     fn registers_inference_orderbook_and_counts_unique_ids() {
         let decoder = Decoder::new().unwrap();
         assert!(decoder.contracts.contains_key("InferenceOrderBook"), "inference abi missing");
-        // 57 DEX + 9 inference + 15 TokenContract + 1 RootModel = 82.
-        assert_eq!(decoder.unique_event_ids(), 82, "unexpected unique event-id count");
+        // 57 DEX + 9 inference + 15 TokenContract + 1 RootModel + 1 SuperRoot = 83.
+        assert_eq!(decoder.unique_event_ids(), 83, "unexpected unique event-id count");
     }
 
     #[test]

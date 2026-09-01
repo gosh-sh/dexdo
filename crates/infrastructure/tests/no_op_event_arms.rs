@@ -32,14 +32,18 @@ use sqlx::PgPool;
 /// which turned the event into the direct signal that a deal's funding cycle is
 /// over. It now writes, so it belongs to
 /// `crates/infrastructure/tests/token_contract_projectors.rs` instead.
-/// The two `RootModel` events are here for a sharper reason than the rest. The
-/// read model has no model-registry table, so they persist nothing — but
-/// `RootModel.ContractDeployed` shares its name, body and signature id with the
-/// deal's own `TokenContract.ContractDeployed`, and until the decoder began
-/// routing dst 703 and 732 apart it decoded as the deal and seeded an
-/// `inference_deals` row per root model. The write assertion below is what pins
-/// that shut: if this event ever writes again, it is that bug returning.
-const UNPERSISTED_DEX_EVENTS: [&str; 10] = [
+/// The three registry events (`RootModel.*`, `SuperRoot.RootRegistered`) are here
+/// for a sharper reason than the rest. The read model has no registry table, so
+/// they persist nothing — their ABIs are loaded only so the rows decode instead of
+/// landing with `event_type` NULL, which would leave them unprojectable and
+/// therefore unprunable forever.
+///
+/// `RootModel.ContractDeployed` carries the sharpest edge: it shares its name,
+/// body and signature id with the deal's own `TokenContract.ContractDeployed`, and
+/// until the decoder began routing dst 703 and 732 apart it decoded as the deal and
+/// seeded an `inference_deals` row per root model. The write assertion below is
+/// what pins that shut: if this event ever writes again, it is that bug returning.
+const UNPERSISTED_DEX_EVENTS: [&str; 11] = [
     "PMP.StakeForfeited",
     "PrivateNote.StakeForfeitConfirmed",
     "PrivateNote.StakeDroppedLocally",
@@ -50,6 +54,7 @@ const UNPERSISTED_DEX_EVENTS: [&str; 10] = [
     "RootPN.DealWriteOffReported",
     "RootModel.ContractDeployed",
     "RootModel.TokenContractRegistered",
+    "SuperRoot.RootRegistered",
 ];
 
 async fn setup() -> Option<PgPool> {

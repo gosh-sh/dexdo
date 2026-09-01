@@ -98,10 +98,12 @@ pub async fn project_event(
         | "PrivateNote.InferenceOrderRemoved"
         | "PrivateNote.InferenceOrderRejectedMirror"
         | "RootPN.DealWriteOffReported" => Ok(ProjectionOutcome::Applied),
-        // The registry side of the inference suite. Both events name a contract that
+        // The registry side of the inference suite. Each event names a contract that
         // was just created, and the read model has no table for a model registry, so
-        // there is nothing to persist — but they need arms all the same, because both
-        // dsts (702, 703) are in `SCOPED_EVENT_IDS` and both rows therefore arrive.
+        // there is nothing to persist — but they need arms all the same, because all
+        // three dsts (700, 702, 703) are in `SCOPED_EVENT_IDS` and the rows therefore
+        // arrive. Without an arm they would land as `Unknown`: still marked processed,
+        // but on a one-off warning rather than a decision recorded here.
         //
         // `RootModel.ContractDeployed` reaches this arm only because the decoder now
         // routes 703 and 732 apart. Before that it decoded as
@@ -109,9 +111,9 @@ pub async fn project_event(
         // and so hit the `TokenContract.` prefix arm below, seeding a phantom
         // `inference_deals` row per root model. The fix is the decoder route; this arm
         // is where the correctly-named event stops.
-        "RootModel.ContractDeployed" | "RootModel.TokenContractRegistered" => {
-            Ok(ProjectionOutcome::Applied)
-        }
+        "RootModel.ContractDeployed"
+        | "RootModel.TokenContractRegistered"
+        | "SuperRoot.RootRegistered" => Ok(ProjectionOutcome::Applied),
         "PrivateNote.InferenceDealClosed" => {
             apply_inference_deal_closed(tx, event, node).await.with_context(context)
         }
