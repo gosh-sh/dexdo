@@ -30,6 +30,7 @@ const ABI_INFERENCE_ORDER_BOOK: &str =
     include_str!("../../../contracts/airegistry/InferenceOrderBook.abi.json");
 const ABI_TOKEN_CONTRACT: &str =
     include_str!("../../../contracts/airegistry/TokenContract.abi.json");
+const ABI_ROOT_MODEL: &str = include_str!("../../../contracts/airegistry/RootModel.abi.json");
 
 const DEX_ABIS: &[(&str, &str)] = &[
     ("RootOracle", ABI_ROOT_ORACLE),
@@ -42,8 +43,15 @@ const DEX_ABIS: &[(&str, &str)] = &[
     ("Nullifier", ABI_NULLIFIER),
 ];
 
-const INFERENCE_ABIS: &[(&str, &str)] =
-    &[("InferenceOrderBook", ABI_INFERENCE_ORDER_BOOK), ("TokenContract", ABI_TOKEN_CONTRACT)];
+/// `RootModel` is loaded for its two events alone, and specifically so that the
+/// `ContractDeployed` id it shares with `TokenContract` resolves by `dst` route
+/// instead of by "whichever ABI happens to be in the bundle" — see the route
+/// table in [`Decoder::new`].
+const INFERENCE_ABIS: &[(&str, &str)] = &[
+    ("InferenceOrderBook", ABI_INFERENCE_ORDER_BOOK),
+    ("TokenContract", ABI_TOKEN_CONTRACT),
+    ("RootModel", ABI_ROOT_MODEL),
+];
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DecodedEvent {
@@ -124,13 +132,15 @@ impl Decoder {
             contracts.insert(kind, contract);
         }
 
-        // Route table: dst-based disambiguation for colliding event ids. No loaded
-        // ABI currently introduces a collision — the InferenceOrderBook events carry
-        // an `Inference` prefix, so InferenceOrderCancelled no longer shares an id with
-        // OrderBook.OrderCancelled, and every event resolves by unique id. These two
-        // OrderCancelled dsts are pinned defensively to keep the path exercised; add
-        // more here if a future ABI reintroduces a collision. `expected_id` is looked
-        // up from the loaded contract, never hardcoded.
+        // Route table: dst-based disambiguation for colliding event ids. One loaded
+        // pair genuinely collides — `RootModel.ContractDeployed` and
+        // `TokenContract.ContractDeployed`, routed below — and every other event
+        // resolves by unique id: the InferenceOrderBook events carry an `Inference`
+        // prefix, so InferenceOrderCancelled no longer shares an id with
+        // OrderBook.OrderCancelled. These two OrderCancelled dsts are pinned
+        // defensively to keep the path exercised; add more here if a future ABI
+        // reintroduces a collision. `expected_id` is looked up from the loaded
+        // contract, never hardcoded.
         let mut routes = HashMap::new();
         Self::add_route(&mut routes, &contracts, 144, "OrderBook", "OrderCancelled")?;
         Self::add_route(
@@ -140,17 +150,23 @@ impl Decoder {
             "InferenceOrderBook",
             "InferenceOrderCancelled",
         )?;
-        // `TokenContract.ContractDeployed` (732, `DealDeployedEmit`) is pinned for a
-        // reason the loaded-ABI set hides. `RootModel.ContractDeployed` is byte-for-byte
-        // the same signature — same name, same single `address` input, therefore the same
-        // signature id — and its own dst, 703, is in `SCOPED_EVENT_IDS`. `RootModel`'s ABI
-        // is simply not loaded here, so today that id resolves to exactly one entry and
-        // the ambiguity never surfaces: a 703 body would decode as a DEAL and seed an
-        // `inference_deals` row under a root model's address. Nothing arrives on 703
-        // because a RootModel lives in the SuperRoot's own dApp, not the DEX one — an
-        // accident of deployment topology, not a guarantee. Routing the deal by its own
-        // `dst` makes the deal's birth identified by where it was sent rather than by
-        // which ABI happens to be in the bundle.
+        // The `ContractDeployed` collision, and the one that has actually cost us
+        // something. `RootModel.ContractDeployed` and `TokenContract.ContractDeployed`
+        // are byte-for-byte the same signature — same name, same single `address` input,
+        // therefore the same signature id — and both dsts, 703 and 732, are in
+        // `SCOPED_EVENT_IDS`. Nothing in the message tells the two apart except where it
+        // was sent, so both are routed by `dst` and neither depends on which ABIs the
+        // bundle happens to carry.
+        //
+        // This used to be handled by loading `TokenContract`'s ABI and not `RootModel`'s,
+        // which left the id resolving to exactly one entry — the deal — and the note here
+        // argued the ambiguity could not surface, because a RootModel lives in the
+        // SuperRoot's own dApp rather than the DEX one. That reasoning was wrong, and
+        // measurably: on stage (2026-09-01) 250 of 1060 `ContractDeployed` rows had
+        // arrived on 703, each one seeding an `inference_deals` row under a root model's
+        // address — 23% of the table, none of them deals, none of them ever linkable to a
+        // book or a note. Deployment topology is not a routing guarantee; the `dst` is.
+        Self::add_route(&mut routes, &contracts, 703, "RootModel", "ContractDeployed")?;
         Self::add_route(&mut routes, &contracts, 732, "TokenContract", "ContractDeployed")?;
 
         Ok(Self { contracts, event_index, routes })
@@ -272,9 +288,13 @@ mod tests {
             assert!(decoder.contracts.contains_key(kind), "missing contract {kind}");
         }
 
-        // 57 DEX unique ids + 9 InferenceOrderBook ids + 15 TokenContract ids = 81
-        // distinct ids. (The InferenceOrderBook events carry an `Inference` prefix, so
-        // none collides with the DEX OrderBook events.) The DEX side gained seven
+        // 57 DEX unique ids + 9 InferenceOrderBook ids + 15 TokenContract ids + 1 from
+        // RootModel = 82 distinct ids. RootModel carries two events but adds only one
+        // KEY: `TokenContractRegistered` is a new id, while `ContractDeployed` shares
+        // `TokenContract`'s and becomes a second entry under an id that already existed
+        // — which is the collision the 703/732 dst routes resolve. (The
+        // InferenceOrderBook events carry an `Inference` prefix, so none collides with
+        // the DEX OrderBook events.) The DEX side gained seven
         // PrivateNote events (DealCredited, BookCredited, InferenceOrderRemoved,
         // InferenceOrderRejectedMirror, InferenceDealClosed, StakeForfeitConfirmed,
         // StakeDroppedLocally) and RootPN.DealWriteOffReported, and lost
@@ -285,7 +305,7 @@ mod tests {
         // id without changing the count — a signature id is a hash of the name AND the
         // input types, so a reshaped event is a different id, not an extra one. Nothing
         // decodes the old id any more; rows carrying it stay undecoded.
-        assert_eq!(decoder.known_events(), 81, "unexpected total event id count");
+        assert_eq!(decoder.known_events(), 82, "unexpected total event id count");
 
         // sample lookups — find entries for PMP
         let pmp_event_ids: Vec<_> = decoder
@@ -306,8 +326,8 @@ mod tests {
     fn registers_inference_orderbook_and_counts_unique_ids() {
         let decoder = Decoder::new().unwrap();
         assert!(decoder.contracts.contains_key("InferenceOrderBook"), "inference abi missing");
-        // 57 DEX + 9 inference + 15 TokenContract = 81.
-        assert_eq!(decoder.unique_event_ids(), 81, "unexpected unique event-id count");
+        // 57 DEX + 9 inference + 15 TokenContract + 1 RootModel = 82.
+        assert_eq!(decoder.unique_event_ids(), 82, "unexpected unique event-id count");
     }
 
     #[test]
@@ -330,6 +350,46 @@ mod tests {
         let unknown_dst =
             decoder.decode_event_body(&body, Some(":dead")).unwrap().decoded().unwrap();
         assert_eq!(unknown_dst.event_type, "InferenceOrderBook.InferenceOrderCancelled");
+    }
+
+    #[test]
+    fn contract_deployed_resolves_by_dst_not_by_abi_order() {
+        // `RootModel.ContractDeployed` and `TokenContract.ContractDeployed` are the
+        // same name over the same body, so ONE encoded body has to produce three
+        // different answers depending only on where it was sent. Anything less and a
+        // root model's announcement lands in `inference_deals` as a deal, which is
+        // exactly what it did before 703 was routed.
+        let d = Decoder::new().unwrap();
+        let body = encode_event_body_b64(
+            &d,
+            "RootModel",
+            "ContractDeployed",
+            serde_json::json!({
+                "self": "0:0000000000000000000000000000000000000000000000000000000000000000"
+            }),
+        );
+
+        let root = d
+            .decode_event_body(&body, Some(&crate::config::event_type_dst(703)))
+            .unwrap()
+            .decoded()
+            .expect("703 routes to the root model");
+        assert_eq!(root.event_type, "RootModel.ContractDeployed");
+
+        let deal = d
+            .decode_event_body(&body, Some(&crate::config::event_type_dst(732)))
+            .unwrap()
+            .decoded()
+            .expect("732 routes to the deal");
+        assert_eq!(deal.event_type, "TokenContract.ContractDeployed");
+
+        // With no dst the id is genuinely ambiguous. Reporting that is the whole
+        // point: picking either ABI here would be a coin flip that silently writes.
+        let ambiguous = d.decode_event_body(&body, None).unwrap();
+        assert!(
+            matches!(ambiguous, DecodeOutcome::AmbiguousCollision { .. }),
+            "an unrouted ContractDeployed must not resolve to either contract, got {ambiguous:?}"
+        );
     }
 
     #[test]
@@ -435,14 +495,33 @@ mod tests {
         assert!(decoder.contracts.contains_key("TokenContract"), "token contract abi missing");
         let tc = decoder.contracts.get("TokenContract").expect("token contract abi loaded");
         for (name, event) in tc.events() {
-            let entries =
-                decoder.event_index.get(&event.get_id()).map(Vec::as_slice).unwrap_or(&[]);
-            assert_eq!(
-                entries.len(),
-                1,
-                "TokenContract.{name} signature id collides with another ABI: {entries:?} — add a dst route via event_type_dst(the event's `TokenContractEvent` discriminant in token_contract_events.rs)"
+            let id = event.get_id();
+            let entries = decoder.event_index.get(&id).map(Vec::as_slice).unwrap_or(&[]);
+            assert!(
+                entries.iter().any(|(k, n)| *k == "TokenContract" && n == name),
+                "TokenContract.{name} is not in the id index: {entries:?}"
             );
-            assert_eq!(entries[0].0, "TokenContract", "{name} resolves to the wrong contract");
+
+            // A shared id is tolerable only when the `dst` tells the entries apart —
+            // `ContractDeployed` is shared with `RootModel` and routed by 703/732. So
+            // the ratchet is not "never collide", it is "never collide unrouted":
+            // EVERY entry under a shared id needs its own route, or a body arriving on
+            // an unrouted dst decodes as whichever ABI happens to be indexed there.
+            if entries.len() > 1 {
+                for (kind, ev) in entries {
+                    assert!(
+                        decoder
+                            .routes
+                            .values()
+                            .any(|r| r.kind == *kind && r.event == *ev && r.expected_id == id),
+                        "TokenContract.{name} shares its signature id with {kind}.{ev}, which has \
+                         no dst route: {entries:?} — add one in `Decoder::new` via the event's \
+                         EVENT_ID constant, or the two decode as each other"
+                    );
+                }
+            } else {
+                assert_eq!(entries[0].0, "TokenContract", "{name} resolves to the wrong contract");
+            }
         }
     }
 
