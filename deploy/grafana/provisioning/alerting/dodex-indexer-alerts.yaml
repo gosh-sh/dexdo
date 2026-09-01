@@ -13,9 +13,11 @@
 # Each rule = a query node (refId A, instant) + a math condition node (refId C).
 # Counter alerts use a __name__=~"...(_total)?" matcher so they fire whether or
 # not the OTel→Prometheus exporter appends _total. Thresholds mirror the Grafana
-# dashboard (deploy/grafana/dodex-indexer-dashboard.json). noDataState is OK so a
-# fully-down indexer (series gone) does not flap these — pair with a separate
-# `up == 0` liveness alert for that case.
+# dashboard (deploy/grafana/dodex-indexer-dashboard.json). noDataState is OK on
+# every gauge/counter rule, so a fully-down indexer (series gone) does not flap
+# them — that case is covered by `dodex-indexer-down` below, which watches how
+# long ago the indexer last pushed rather than any threshold it reports.
+
 
 apiVersion: 1
 
@@ -25,6 +27,78 @@ groups:
     folder: Dodex Indexer
     interval: 1m
     rules:
+      # LIVENESS. Every other rule here reads a gauge the indexer exports and
+      # sets noDataState: OK, so a process that has stopped exporting silences
+      # all of them by construction — "no data" is not "over threshold". That is
+      # the outage most worth paging on: the gateway retains a short window of
+      # events, and anything it ages out while the indexer is down cannot be
+      # recovered by reprojection, which replays `raw_events` and cannot refetch
+      # what was never captured. A stall is permanent data loss, not a delay.
+      #
+      # NOT `up == 0`. The indexer is not a scrape target: it has no /metrics
+      # route and pushes OTLP to a collector (`OTEL_EXPORTER_OTLP_ENDPOINT`,
+      # PeriodicReader, 30s). Prometheus synthesises `up` for targets it scrapes,
+      # so `up{job="…"}` for the indexer does not exist and a rule built on it
+      # would alert on nothing at all — or, with noDataState: Alerting, forever.
+      #
+      # No environment selector, deliberately. `service.name` (and with it the
+      # `job` label) differs per environment — `dexdo-indexer` on prod,
+      # `dodex-indexer` on stage, set from `dexdo_otel_service_name` in the deploy
+      # inventory. Naming one of them here would need a copy of this rule per
+      # environment AND knowledge of whether each Grafana sees one or both, since
+      # a rule naming an environment its Grafana cannot see fires forever. The
+      # first half below is per-series instead: it produces one alert instance per
+      # `job` that actually reports, and none for a `job` that does not exist
+      # here. One rule, any topology, nothing to substitute.
+      #
+      # Why the subquery. `timestamp()` alone reads the last sample only while the
+      # series is inside Prometheus's lookback (~5min); past that the series is
+      # gone and the alert would resolve itself exactly as the outage got worse.
+      # `max_over_time(timestamp(...)[6h:1m])` is the last-seen timestamp over six
+      # hours, so the alert keeps firing through a long outage. 120s is four
+      # missed pushes at the 30s OTLP interval, with room for the 1m subquery
+      # resolution; detection lands around 3-4min with `for: 2m`.
+      #
+      # `absent()` is the second half and carries NO job selector on purpose: it
+      # covers the case the first half cannot see — an indexer that never started,
+      # so there is no series to have a timestamp. Unselectored it means "no
+      # indexer anywhere is reporting", which is correct in both topologies and
+      # cannot false-fire in either.
+      #
+      # noDataState is OK, not Alerting: in the HEALTHY case this expression
+      # matches nothing, so "no data" is the good state here.
+      - uid: dodex-indexer-down
+        title: Indexer not running
+        condition: C
+        for: 2m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: critical, service: dodex-indexer }
+        annotations:
+          summary: "Indexer not running"
+          description: "{{ $labels.job }} has not pushed metrics for over 120s (instance {{ $labels.instance }}), or no indexer series exists at all. Ingest has stopped, and events the gateway ages out meanwhile cannot be recovered by reprojection — it replays raw_events and cannot refetch. Restart it, then watch indexer_capture_cursor_age_seconds drain back to normal."
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: REPLACE_WITH_PROMETHEUS_DS_UID
+            model:
+              refId: A
+              editorMode: code
+              expr: (time() - max_over_time(timestamp(indexer_capture_cursor_age_seconds)[6h:1m]) > 120) or absent(indexer_capture_cursor_age_seconds)
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              datasource: { type: prometheus, uid: REPLACE_WITH_PROMETHEUS_DS_UID }
+          - refId: C
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: math
+              expression: "$A > 0"
+              datasource: { type: __expr__, uid: __expr__ }
+
       - uid: dodex-proj-lag-warn
         title: Indexer projection lag elevated
         condition: C

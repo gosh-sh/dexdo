@@ -11,6 +11,12 @@ All notable changes to DEX.DO are recorded here. Entries are date-based, newest 
 
 **What an operator has to do.** Neither fix repairs rows already in `raw_events`: there is no automatic re-decode, and reprojection replays the `event_type` stored at ingest rather than decoding the body again. Phantom `inference_deals` rows have to be deleted by hand — they are the ones whose `ContractDeployed` arrived on 703, and they will not come back on their own, because the rows that seeded them are already marked processed and are therefore outside the reprojection window. Rows already stored with `event_type` NULL stay undecodable and stay unprunable.
 
+### Added
+
+- **A liveness alert for the indexer — `dodex-indexer-down`.** Every other rule in [`deploy/grafana/provisioning/alerting/dodex-indexer-alerts.yaml`](deploy/grafana/provisioning/alerting/dodex-indexer-alerts.yaml) reads a gauge the indexer exports and sets `noDataState: OK`, so a process that has stopped exporting silences all of them by construction — "no data" is not "over threshold". The new rule watches how long ago each indexer last pushed instead: >120s (four missed 30s pushes), measured over a six-hour window so the alert does not resolve itself as the outage lengthens, and falling back to `absent()` for an indexer that never started at all. It matters more than an ordinary liveness page — the gateway retains a short window of events, and anything it ages out while the indexer is down cannot be recovered by reprojection, which replays `raw_events` and cannot refetch what was never captured.
+
+  No new substitution to install: the rule names no environment and raises one alert per indexer that reports, so the same file works whether a Grafana sees one environment or several.
+
 ## [2026-08-27]
 
 ### Fixed

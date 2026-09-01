@@ -486,7 +486,7 @@ The repository ships a ready dashboard and alert rules under `deploy/grafana/`:
 | File | What it is | How to use |
 | --- | --- | --- |
 | [`deploy/grafana/dodex-indexer-dashboard.json`](../deploy/grafana/dodex-indexer-dashboard.json) | Grafana dashboard covering every indexer metric — ingestion (`raw_events` counters), projection pipeline (backlog/lag/cursor age/fallbacks), DB pool, and inference markets (state, order depth, reconcile failures, price/sweep staleness) | Grafana → Dashboards → Import → Upload JSON; pick your Prometheus when prompted |
-| [`deploy/grafana/provisioning/alerting/dodex-indexer-alerts.yaml`](../deploy/grafana/provisioning/alerting/dodex-indexer-alerts.yaml) | 12 Grafana-managed alert rules (projection/cursor lag, decode errors, inference markets `failing`, reference-price & sweep staleness), warning→critical | Copy to Grafana's `/etc/grafana/provisioning/alerting/` and restart Grafana |
+| [`deploy/grafana/provisioning/alerting/dodex-indexer-alerts.yaml`](../deploy/grafana/provisioning/alerting/dodex-indexer-alerts.yaml) | 18 Grafana-managed alert rules: indexer liveness (last-push age), projection/cursor lag, decode errors, inference markets `failing`, reference-price & sweep staleness — warning→critical | Copy to Grafana's `/etc/grafana/provisioning/alerting/` and restart Grafana |
 
 Two setup notes, also documented in the files themselves:
 
@@ -495,13 +495,28 @@ Two setup notes, also documented in the files themselves:
   `counter_suffix` template variable (default `_total`; switch to `(none)` if your
   collector disables it); the alert rules match `…(_total)?` so they fire either
   way. Gauge metrics get no suffix.
-- **Alert data source UID.** Provisioned alert rules reference the Prometheus data
-  source by UID. Before installing, replace the placeholder with yours (found
-  under Connections → Data sources):
+- **Alert data source UID.** Provisioned alert rules reference the Prometheus
+  data source by UID. Replace the placeholder before installing:
   ```sh
   sed -i 's/REPLACE_WITH_PROMETHEUS_DS_UID/<your-uid>/g' \
     deploy/grafana/provisioning/alerting/dodex-indexer-alerts.yaml
   ```
+  That is the only substitution. The liveness rule deliberately names no
+  environment: `service.name` (and with it the `job` label) differs per
+  environment — it comes from `dexdo_otel_service_name` in the deploy inventory —
+  and pinning one would need a copy of the rule per environment plus knowledge of
+  which environments each Grafana can see. The rule is per-series instead, so it
+  raises one alert per indexer that actually reports and stays silent about ones
+  that do not exist wherever it is installed.
+- **Liveness is not optional.** `dodex-indexer-down` is the only rule that fires
+  when the indexer stops exporting. Every other rule sets `noDataState: OK`, so a
+  dead process silences them by construction. It watches how long ago each indexer
+  last pushed (>120s = four missed 30s pushes) over a six-hour window, so the
+  alert does not resolve itself as the outage lengthens, and falls back to
+  `absent()` for an indexer that never started at all. Events the gateway ages out
+  while the indexer is down cannot be recovered by reprojection, so this is the
+  rule that separates "we lost a few minutes of ingest" from "we lost it and
+  nobody noticed".
 
 Alert thresholds (lag/age cutoffs, `failing > 0`, decode-error rate) mirror the
 dashboard's panel thresholds and are conservative starting points — retune them
