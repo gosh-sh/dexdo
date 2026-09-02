@@ -129,9 +129,21 @@ select count(*) filter (where last_swept_at is null)                    as never
        count(*) filter (where last_swept_at > now() - interval '1 hour') as fresh_1h,
        count(*)                                                         as total
   from inference_markets where last_reconciled_at is not null;
+
+-- THE ONE THAT MEANS SOMETHING: lag over the books the sweep is actually due to visit.
+-- Compare it against the `sweep_lag` above before concluding anything.
+select now() - min(m.last_swept_at) as sweep_lag_actionable, count(*) as books_due
+  from inference_markets m
+ where m.last_reconciled_at is not null and m.superseded_at is null
+   and exists (select 1 from inference_orders o
+                where o.orderbook_address = m.orderbook_address and o.status = 'OPEN');
 ```
 
-Interpretation: one stuck book drives `min()` — but only the count query tells you whether it IS one book. A sweep also waits on `at_head = true` and on there being no pending `raw_events` for that book's `src_address`, so an L2 backlog *can* stall sweeps. Do not assume that link: join the stale books against pending rows for the same `src_address` and measure it. Recorded negative result — on an earlier stage dataset, 2732 of 2901 books stale for over 7 days had no pending rows at all, so the gate was not the cause.
+**`sweep_lag` over all reconciled books is not a health metric.** A book with no `OPEN` order is never re-swept, deliberately: the candidate query in `inference_reconciler.rs` admits a book for sweeping only via `... and exists (select 1 from inference_orders o where ... o.status='OPEN')`, and `run_sweep_step` is gated again on `has_open_orders` — stamping `last_swept_at` for a book with nothing resting would spend `getQueueSize`/`getStats` getters for no work. So `min(last_swept_at)` grows without bound as books finish trading, on every environment, forever. Use `sweep_lag_actionable`; treat the raw `sweep_lag` as a number that only ever moves one way.
+
+Worked example (stage, 2026-09-02): raw `sweep_lag` read **5 days**, and 316 of 522 books had not been swept since the post-wipe catch-up on 08-28 — which looks like a mass stall. Every one of those 316 had **zero** open orders, while the 79 books swept within 20h held 10 between them. `sweep_lag_actionable` over the 10 books actually due: **2m17s**.
+
+Only after that reads badly is the gate worth checking: a sweep also waits on `at_head = true` and on no pending `raw_events` for the book's `src_address`, so an L2 backlog *can* stall it. Do not assume that link either — join the stale books against pending rows for the same `src_address` and measure. Recorded negative result: on an earlier stage dataset 2732 of 2901 books stale for over 7 days had no pending rows at all.
 
 ## L3 — Why is market X not visible?
 
@@ -213,4 +225,5 @@ vacuum (analyze) raw_events;                              -- after a big purge
 | Reading a flat `undecodable` count as harmless background | No longer true since the registry ABIs were loaded: nothing that reaches a scoped `dst` is undecodable by design any more, so any row there is drift. |
 | `permission denied for schema cron` = "the job is missing" | It means the role cannot look. Check `pg_proc` for the procedure first — that IS readable, and its absence is the answer the `cron` query was being asked for. |
 | Matching a `dst` by suffix (`like '%2bf'`) | `dst_address` holds both routing ids and ordinary 64-hex contract addresses; a suffix match catches addresses that merely end the same way. Compare the full `':' \|\| lpad(to_hex(id),64,'0')`, or extract with `right(dst_address,16)`. |
+| Reading `sweep_lag` (`min(last_swept_at)`) as sweep health | It includes books with no `OPEN` orders, which are never re-swept by design, so it only ever grows. Measure over books that have an open order — on stage that was 5 days versus 2m17s for the same database. |
 | `VACUUM FULL` during ops/cron | ACCESS EXCLUSIVE lock on the hot table. Use `vacuum (analyze)`. |
