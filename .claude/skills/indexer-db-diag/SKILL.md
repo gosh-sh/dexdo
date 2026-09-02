@@ -143,7 +143,36 @@ select now() - min(m.last_swept_at) as sweep_lag_actionable, count(*) as books_d
 
 Worked example (stage, 2026-09-02): raw `sweep_lag` read **5 days**, and 316 of 522 books had not been swept since the post-wipe catch-up on 08-28 — which looks like a mass stall. Every one of those 316 had **zero** open orders, while the 79 books swept within 20h held 10 between them. `sweep_lag_actionable` over the 10 books actually due: **2m17s**.
 
-Only after that reads badly is the gate worth checking: a sweep also waits on `at_head = true` and on no pending `raw_events` for the book's `src_address`, so an L2 backlog *can* stall it. Do not assume that link either — join the stale books against pending rows for the same `src_address` and measure. Recorded negative result: on an earlier stage dataset 2732 of 2901 books stale for over 7 days had no pending rows at all.
+**When `sweep_lag_actionable` is NULL it says nothing about liveness — read the two lags against each other instead.** With `books_due = 0` the actionable query returns NULL, which is the right answer to "how stale are the books due a sweep" and no answer at all to "is the reconciler running". The pair does answer it, because Queue B's candidate predicate is an OR of two independent due-conditions (`select_refresh_books_scoped`, `inference_reconciler.rs`):
+
+```
+(reference_price_at is null or reference_price_at < now() - reference_price_refresh)
+or
+((last_swept_at is null or last_swept_at < now() - sweep_interval)
+   and exists (select 1 from inference_orders o where ... o.status = 'OPEN'))
+```
+
+The `OPEN`-order gate hangs on the sweep half **only**. An idle book is therefore still visited on the price half, at the `reference_price_refresh` interval — it simply leaves `last_swept_at` untouched. So the two lags moving differently is itself the signal:
+
+| `price_lag` | `sweep_lag` | Reading |
+|---|---|---|
+| advancing — `min` moves forward | grows by exactly the elapsed time | loop alive, sweep idle by design |
+| grows by exactly the elapsed time | grows by exactly the elapsed time | Queue B is not turning — suspect the reconciler, not the data |
+
+Both numbers are `now() - min(...)`, so both grow on their own: take two readings minutes apart, or read the timestamps absolutely, and compare the growth against the wall-clock gap between them. Measured on prod, 2026-09-02, two readings ~1h36m apart: `sweep_lag` grew by the full 1h36m while `price_lag` grew by 9m35s. In absolute terms all 8 books carried a `reference_price_at` from the past hour, while `last_swept_at` spanned 08-25 to 08-31. Prod had zero `OPEN` orders anywhere, so `sweep_lag_actionable` was NULL and this pair was the only liveness evidence available.
+
+**`price_lag` carries the same latent flaw `sweep_lag` does.** The shipped metric (`inference_staleness_seconds`, `indexer_repo.rs`) takes `min(reference_price_at)` over `last_reconciled_at is not null` and does **not** exclude superseded books, while the refresh candidate query does — so a superseded book's price timestamp freezes and pins the metric upward for good. Check before believing a large `price_lag`:
+
+```sql
+select now() - min(reference_price_at) as price_lag_metric,
+       now() - min(reference_price_at) filter (where superseded_at is null) as price_lag_live,
+       count(*) filter (where superseded_at is not null) as superseded
+  from inference_markets where last_reconciled_at is not null;
+```
+
+Both environments held zero superseded books on 2026-09-02, so this one is structural — read off the two queries, not measured in the wild.
+
+Only after `sweep_lag_actionable` itself reads badly is the gate worth checking: a sweep also waits on `at_head = true` and on no pending `raw_events` for the book's `src_address`, so an L2 backlog *can* stall it. Do not assume that link either — join the stale books against pending rows for the same `src_address` and measure. Recorded negative result: on an earlier stage dataset 2732 of 2901 books stale for over 7 days had no pending rows at all.
 
 ## L3 — Why is market X not visible?
 
@@ -226,4 +255,6 @@ vacuum (analyze) raw_events;                              -- after a big purge
 | `permission denied for schema cron` = "the job is missing" | It means the role cannot look. Check `pg_proc` for the procedure first — that IS readable, and its absence is the answer the `cron` query was being asked for. |
 | Matching a `dst` by suffix (`like '%2bf'`) | `dst_address` holds both routing ids and ordinary 64-hex contract addresses; a suffix match catches addresses that merely end the same way. Compare the full `':' \|\| lpad(to_hex(id),64,'0')`, or extract with `right(dst_address,16)`. |
 | Reading `sweep_lag` (`min(last_swept_at)`) as sweep health | It includes books with no `OPEN` orders, which are never re-swept by design, so it only ever grows. Measure over books that have an open order — on stage that was 5 days versus 2m17s for the same database. |
+| `sweep_lag_actionable` came back NULL, so nothing is wrong | NULL means no book is due a sweep at all. That is silence about the reconciler, not a clean bill of health — compare how `price_lag` and `sweep_lag` grew between two readings. |
+| A large `price_lag` means prices are stale | The shipped metric does not exclude superseded books, whose `reference_price_at` never advances again. Re-measure with `filter (where superseded_at is null)` first. |
 | `VACUUM FULL` during ops/cron | ACCESS EXCLUSIVE lock on the hot table. Use `vacuum (analyze)`. |
