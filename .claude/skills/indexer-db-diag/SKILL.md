@@ -1,24 +1,36 @@
 ---
-name: staging-diag
-description: Use when the staging deployment (Supabase Postgres) misbehaves — projection lag or sweep lag is growing, a market or oracle event that exists on-chain is missing from the API/read model, raw_events is bloating disk, or the indexer backlog will not drain.
+name: indexer-db-diag
+description: Use when a dodex indexer database misbehaves, on stage OR prod — projection lag or sweep lag is growing, a market or oracle event that exists on-chain is missing from the API/read model, raw_events is bloating disk, undecodable rows appear, or the indexer backlog will not drain.
 ---
 
-# Staging DB Diagnosis
+# Indexer DB Diagnosis
 
-Diagnose stage top-down: L1 ingest → L2 projection → L3 visibility. Each level's query is the same one the indexer's own metrics use (`crates/infrastructure/src/indexer_repo.rs`), so results match the dashboards.
+Diagnose top-down: L1 ingest → L2 projection → L3 visibility. Each level's query is the same one the indexer's own metrics use (`crates/infrastructure/src/indexer_repo.rs`), so results match the dashboards.
 
-## Connection — never paste secrets
+Both environments run the same migrations and the same schema, so **every query below is identical on stage and prod**. What differs is what the numbers MEAN — see [Reading the numbers per environment](#reading-the-numbers-per-environment). Ignoring that section is how a normal prod reads as an outage and a real one reads as normal.
 
-Read the URL from `~/.config/dodex/stage.env` (var `STAGE_DATABASE_URL`). If the file is missing, ask the user to create it (mode 600) — never paste a password into the chat or transcript. URL template: `docs/deployment.md` (Supabase section, ~line 106): `postgresql://<role>.<project-ref>:<password>@aws-...pooler.supabase.com:5432/postgres`, password percent-encoded (`$`→`%24`, `@`→`%40`).
+## Environment — pick one deliberately
+
+| | stage | prod |
+|---|---|---|
+| Credentials | `~/.config/dodex/stage.env` → `STAGE_DATABASE_URL` | `~/.config/dodex/prod.env` → `PROD_DATABASE_URL` |
+| Chain | shellnet | mainnet |
+| Writes | allowed after confirming with the user | **never — read-only, no exceptions** |
+
+**Default to stage.** Only touch prod when the user names it, and say which one you are on in your first reply — a number reported without its environment is worse than no number.
+
+**Prod is read-only.** Run `select` only. The Remediation section at the end does not apply to prod: `call prune_raw_events(...)` and `vacuum` are real operations against live data, and nothing in a diagnosis needs them. If prod turns out to need a mutation, hand the statement to the user rather than running it.
+
+If the env file is missing, ask the user to create it (mode 600) — never paste a password into the chat or transcript. URL template: `docs/deployment.md` (Supabase section, ~line 106): `postgresql://<role>.<project-ref>:<password>@aws-...pooler.supabase.com:5432/postgres`, password percent-encoded (`$`→`%24`, `@`→`%40`).
 
 ```bash
-set -a; . ~/.config/dodex/stage.env; set +a
+set -a; . ~/.config/dodex/stage.env; set +a      # or prod.env → PROD_DATABASE_URL
 PGCONNECT_TIMEOUT=8 psql "$STAGE_DATABASE_URL"
 ```
 
 The URL as a psql argument is visible in the host process list — acceptable on a single-user machine; otherwise use `~/.pgpass` or a `PGSERVICE` entry.
 
-Repo docs and the stage config use the pooler host on port **5432** (session mode) — use that for interactive psql. `sslmode=require` is the Supabase default (general Supabase behaviour; not in repo docs).
+Both indexer configs (`config/indexer.stage.supabase.yaml`, `~/.config/dodex/indexer.prod.yaml`) use the pooler host on port **5432** (session mode) — use that for interactive psql. `sslmode=require` is the Supabase default (general Supabase behaviour; not in repo docs).
 
 Session mode has 15 slots and they do run out, including through no fault of yours — a running indexer holds some. The symptom is `FATAL: (EMAXCONNSESSION) max clients reached in session mode - max clients are limited to pool_size: 15`. Port **6543** is the transaction pooler and has its own budget, so rewrite the port rather than waiting:
 
@@ -28,6 +40,23 @@ PGCONNECT_TIMEOUT=10 psql "$TX" -c '...'
 ```
 
 Transaction mode does not keep session state (no `SET`, no advisory locks held across statements), which none of the queries below need.
+
+## Reading the numbers per environment
+
+The queries are identical; these four readings are not. Each is a case where the honest answer on one environment is an incident on the other.
+
+| Reading | stage | prod |
+|---|---|---|
+| Old `ingest_age` | suspicious — e2e drives near-constant traffic | **normal** — mainnet is nearly idle |
+| `markets` empty | broken — prediction markets live here | **normal** — none are deployed to mainnet |
+| `undecodable > 0` | drift, act on it | check the DATE first, see below |
+| Remediation section | applies | **does not apply** |
+
+**Chain liveness.** Mainnet DEX-dapp activity is close to zero: a gateway query from a 2026-08-01 cursor returned a single event. So on prod an `ingest_age` of days means the chain is quiet, not that ingest died — the discriminator is `cursor_age`, which must stay fresh regardless of whether anything is arriving. On stage the two move together, so a quiet `ingest_age` there is worth chasing.
+
+**Undecodable on prod carries an immovable historical population.** The L2 rule below — any undecodable row means drift — is about rows arriving *now*. Prod also holds 31085 rows on dst 101 (`RootPN.PrivateNoteDeployed`), every one ingested on 2026-08-20 by the initial backfill, carrying a signature id from an older contract generation. The same id decodes cleanly on stage, so this is not a loaded-ABI problem; those bodies simply predate the current ABI and there is no re-decode path, so they will never resolve, never project and never become prunable. Judge prod drift by `max(created_at)` and by date buckets, never by the total.
+
+**Environments do not run the same build.** A fix merged to `dev` deploys to stage; prod deploys from `main` (`.woodpecker/deploy.yml`). Before concluding that prod behaves differently *by nature*, check whether it simply has an older binary — the decoder's loaded-ABI set is compiled in, so a decode difference between environments is usually a deploy difference.
 
 ## L1 — Is the indexer receiving events?
 
@@ -62,9 +91,9 @@ select count(*) as undecodable, max(created_at) as latest from raw_events where 
 
 Interpretation: backlog growing with old `oldest_pending` = projection loop stuck/slow — check indexer logs at the `min(chain_order)` row.
 
-**Any undecodable row means ABI drift — there is no benign background.** Every contract that emits to a scoped `dst` has its ABI loaded into the decoder (`DEX_ABIS` + `INFERENCE_ABIS`, twelve of them, `RootModel` and `SuperRoot` included). Of the ABIs that ship unloaded, `ModelRegistry` declares no events at all and `Multisig` is a wallet outside the ingest scope, so neither can put a row here. A non-zero count therefore means the decoder no longer matches the deployed contracts: rebuild and redeploy.
+**Any undecodable row arriving NOW means ABI drift — there is no benign background.** (On prod, read this together with the historical-backfill caveat above: judge by date, not by total.) Every contract that emits to a scoped `dst` has its ABI loaded into the decoder (`DEX_ABIS` + `INFERENCE_ABIS`, twelve of them, `RootModel` and `SuperRoot` included). Of the ABIs that ship unloaded, `ModelRegistry` declares no events at all and `Multisig` is a wallet outside the ingest scope, so neither can put a row here. A non-zero count therefore means the decoder no longer matches the deployed contracts: rebuild and redeploy.
 
-This is a recent sharpening. Until the registry ABIs were loaded, most undecodable rows were ordinary `RootModel`/`SuperRoot` events and a steady background WAS normal — on stage it was the entire undecodable population, 1058 rows. Text written against that era reads a flat count as harmless; it no longer is.
+This is a recent sharpening. Until the registry ABIs were loaded, most undecodable rows were ordinary `RootModel`/`SuperRoot` events and a steady background WAS normal — on stage they were the entire undecodable population, 1058 rows. Text written against that era reads a flat count as harmless; it no longer is.
 
 Undecodable rows are also never projected, never counted in the backlog above, and — because `processed_at` stays NULL forever — permanently out of the pruner's reach. Identify the contract before reporting a count:
 
@@ -161,9 +190,9 @@ select pg_size_pretty(pg_total_relation_size('raw_events')) as total,
   from raw_events;
 ```
 
-Interpretation. **Step 1 returning zero rows means the pruner is not installed** — no job can be running, whatever `cron` would have said. That is the state stage was found in on 2026-09-02, with 16330 rows already eligible; the fix is to apply `deploy/sql/prune_raw_events.sql` — which installs the procedure *and* schedules the job — not to hunt for a broken schedule. It has to run as a privileged role (on Supabase, the SQL editor, which runs as `postgres`); the pooler role can neither create the extension nor schedule jobs. See [`docs/deployment.md`](../../../docs/deployment.md) § raw_events retention. `permission denied for schema cron` in step 2 means "cannot check from here", **not** "the job is missing" — confirm through the Supabase dashboard (Database → Cron) or a privileged role. A `prunable_now` that keeps climbing across days is the outcome-level symptom either way.
+Interpretation. **Step 1 returning zero rows means the pruner is not installed** — no job can be running, whatever `cron` would have said. That is the state BOTH environments were found in on 2026-09-02 — no `prune_raw_events` in `pg_proc` on either, with 16330 rows already eligible on stage; the fix is to apply `deploy/sql/prune_raw_events.sql` — which installs the procedure *and* schedules the job — not to hunt for a broken schedule. It has to run as a privileged role (on Supabase, the SQL editor, which runs as `postgres`); the pooler role can neither create the extension nor schedule jobs. See [`docs/deployment.md`](../../../docs/deployment.md) § raw_events retention. `permission denied for schema cron` in step 2 means "cannot check from here", **not** "the job is missing" — confirm through the Supabase dashboard (Database → Cron) or a privileged role. A `prunable_now` that keeps climbing across days is the outcome-level symptom either way.
 
-**Remediation — mutates data, confirm with the user first** (out of scope for pure diagnosis):
+**Remediation — STAGE ONLY, mutates data, confirm with the user first** (out of scope for pure diagnosis). On prod, hand these to the user instead of running them:
 
 ```sql
 call public.prune_raw_events(interval '3 days', 10000);  -- only if step 1 found it
@@ -179,7 +208,7 @@ vacuum (analyze) raw_events;                              -- after a big purge
 | Ordering by `id`/`created_at` | `chain_order` (lex-sortable text) is the sole projection-ordering key. |
 | Judging visibility by `approved` | Read API gates on `last_reconciled_at IS NOT NULL` (`markets` and `inference_markets`). |
 | Counting inference books without `superseded_at IS NULL` | Superseded books are excluded from the API and metrics. |
-| "Ingest is broken — no `OrderBook.Queued` / `PMP.StakeAccepted` rows" | Stage drops those types before insert (`config/indexer.stage.supabase.yaml` `ignored_event_types`). |
+| "Ingest is broken — no `OrderBook.Queued` / `PMP.StakeAccepted` rows" | Both environments drop those three types before insert — `ignored_event_types` is byte-identical in `config/indexer.stage.supabase.yaml`, `~/.config/dodex/indexer.prod.yaml` and the ansible template. The list is an allow-list validated at startup, so it cannot grow through a config-only deploy. |
 | "There is no dapp filtering, `indexer.dapp_id` is unset" | The config key is indeed unset, but scoping is not done there: the gateway query itself is parameterised by `src_dapp_id` and pinned to the compile-time `DEX_DAPP_ID`, so ingest is dapp-scoped server-side, at fetch. What the unset key means is only that no *additional* local filter runs. |
 | Reading a flat `undecodable` count as harmless background | No longer true since the registry ABIs were loaded: nothing that reaches a scoped `dst` is undecodable by design any more, so any row there is drift. |
 | `permission denied for schema cron` = "the job is missing" | It means the role cannot look. Check `pg_proc` for the procedure first — that IS readable, and its absence is the answer the `cron` query was being asked for. |
