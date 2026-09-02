@@ -18,7 +18,16 @@ PGCONNECT_TIMEOUT=8 psql "$STAGE_DATABASE_URL"
 
 The URL as a psql argument is visible in the host process list — acceptable on a single-user machine; otherwise use `~/.pgpass` or a `PGSERVICE` entry.
 
-Repo docs and the stage config use the pooler host on port **5432** (session mode) — use that for interactive psql. Port 6543 is Supabase's transaction pooler and `sslmode=require` is the Supabase default (general Supabase behavior; not in repo docs).
+Repo docs and the stage config use the pooler host on port **5432** (session mode) — use that for interactive psql. `sslmode=require` is the Supabase default (general Supabase behaviour; not in repo docs).
+
+Session mode has 15 slots and they do run out, including through no fault of yours — a running indexer holds some. The symptom is `FATAL: (EMAXCONNSESSION) max clients reached in session mode - max clients are limited to pool_size: 15`. Port **6543** is the transaction pooler and has its own budget, so rewrite the port rather than waiting:
+
+```bash
+TX=$(printf '%s' "$STAGE_DATABASE_URL" | sed 's#:5432/#:6543/#')   # never echo either URL
+PGCONNECT_TIMEOUT=10 psql "$TX" -c '...'
+```
+
+Transaction mode does not keep session state (no `SET`, no advisory locks held across statements), which none of the queries below need.
 
 ## L1 — Is the indexer receiving events?
 
@@ -51,7 +60,24 @@ select event_type, count(*), min(chain_order)
 select count(*) as undecodable, max(created_at) as latest from raw_events where event_type is null;
 ```
 
-Interpretation: backlog growing with old `oldest_pending` = projection loop stuck/slow — check indexer logs at the `min(chain_order)` row. A jump in `undecodable` after a contract upgrade = decoder ABI drift (those rows are never projected and never counted in backlog).
+Interpretation: backlog growing with old `oldest_pending` = projection loop stuck/slow — check indexer logs at the `min(chain_order)` row.
+
+**Any undecodable row means ABI drift — there is no benign background.** Every contract that emits to a scoped `dst` has its ABI loaded into the decoder (`DEX_ABIS` + `INFERENCE_ABIS`, twelve of them, `RootModel` and `SuperRoot` included). Of the ABIs that ship unloaded, `ModelRegistry` declares no events at all and `Multisig` is a wallet outside the ingest scope, so neither can put a row here. A non-zero count therefore means the decoder no longer matches the deployed contracts: rebuild and redeploy.
+
+This is a recent sharpening. Until the registry ABIs were loaded, most undecodable rows were ordinary `RootModel`/`SuperRoot` events and a steady background WAS normal — on stage it was the entire undecodable population, 1058 rows. Text written against that era reads a flat count as harmless; it no longer is.
+
+Undecodable rows are also never projected, never counted in the backlog above, and — because `processed_at` stays NULL forever — permanently out of the pruner's reach. Identify the contract before reporting a count:
+
+```sql
+-- Group by the routing id, not the raw address. dst_address holds `:` + 64 zero-padded
+-- hex digits, so right(...,16) is the id; a suffix LIKE would also match ordinary
+-- contract addresses that happen to end in the same digits.
+select ('x' || right(dst_address, 16))::bit(64)::bigint as dst_id,
+       count(*), min(created_at)::date as first, max(created_at)::date as last
+  from raw_events where event_type is null group by 1 order by 2 desc limit 15;
+```
+
+Name the id from the `EVENT_ID` constants in `contracts/*/modifiers/modifiers.sol` — the same set `crates/infrastructure/tests/ingest_scope.rs` re-derives. An id that resolves to a loaded contract, yet decodes to nothing, is a signature-id collision needing a `dst` route in `Decoder::new` rather than a rebuild.
 
 **Sweep lag (inference books):**
 
@@ -60,13 +86,23 @@ select now() - min(reference_price_at) as price_lag,
        now() - min(last_swept_at)      as sweep_lag
   from inference_markets where last_reconciled_at is not null;
 
+-- There is no error-text column. `inference_markets` records only THAT a reconcile
+-- failed (last_reconcile_failed_at) and how often it was retried; the reason is in the
+-- indexer log at that timestamp.
 select orderbook_address, last_swept_at, sweep_cursor, reconcile_attempts,
-       last_reconcile_failed_at, last_reconcile_error
+       last_reconcile_failed_at, sweep_cycle_max, sweep_override_seq
   from inference_markets where last_reconciled_at is not null
  order by last_swept_at asc nulls first limit 5;
+
+-- min() hides how wide the staleness is. Check the shape before blaming one book.
+select count(*) filter (where last_swept_at is null)                    as never_swept,
+       count(*) filter (where last_swept_at < now() - interval '7 days') as older_7d,
+       count(*) filter (where last_swept_at > now() - interval '1 hour') as fresh_1h,
+       count(*)                                                         as total
+  from inference_markets where last_reconciled_at is not null;
 ```
 
-Interpretation: one stuck book drives `min()`. A sweep also waits on `at_head = true` and no pending raw_events for that book's `src_address` — so an L2 backlog stalls sweeps too.
+Interpretation: one stuck book drives `min()` — but only the count query tells you whether it IS one book. A sweep also waits on `at_head = true` and on there being no pending `raw_events` for that book's `src_address`, so an L2 backlog *can* stall sweeps. Do not assume that link: join the stale books against pending rows for the same `src_address` and measure it. Recorded negative result — on an earlier stage dataset, 2732 of 2901 books stale for over 7 days had no pending rows at all, so the gate was not the cause.
 
 ## L3 — Why is market X not visible?
 
@@ -95,27 +131,42 @@ Interpretation: `last_reconciled_at IS NULL` = invisible to the read API regardl
 
 ## Maintenance — raw_events bloat
 
-Pruning lives in `deploy/sql/prune_raw_events.sql`: a pg_cron job `prune-raw-events` (daily 03:00 UTC) calls `public.prune_raw_events(interval '3 days', 10000)` — batched id-range deletes of **processed** rows older than 3 days, advisory-lock guarded; pending rows are never deleted.
+`deploy/sql/prune_raw_events.sql` describes the intended setup: a pg_cron job `prune-raw-events` (daily 03:00 UTC) calling `public.prune_raw_events(interval '3 days', 10000)` — batched id-range deletes of **processed** rows older than 3 days, advisory-lock guarded, pending rows never touched.
 
-**Read-only checks:**
+That is the repo's intent, not a statement about the database in front of you. **Check that the procedure exists before diagnosing the job**, because the role in `STAGE_DATABASE_URL` can read `pg_proc` but not `cron`:
 
 ```sql
--- NOTE: the count(*) filters are a full scan — can be slow/heavy on a bloated table.
-select pg_size_pretty(pg_total_relation_size('raw_events')) as total,
-       count(*) filter (where processed_at is not null) as processed,
-       count(*) filter (where processed_at is null)     as pending
-  from raw_events;
+-- Step 1. Does the procedure exist at all? Readable by any role.
+select n.nspname, p.proname, p.prokind
+  from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+ where p.proname = 'prune_raw_events';
 
+-- Step 2. Only meaningful if step 1 returned a row. Expect
+-- `ERROR: permission denied for schema cron` — see the interpretation below.
 select jobid, schedule, active from cron.job where jobname = 'prune-raw-events';
 select status, return_message, start_time from cron.job_run_details
  where jobid = (select jobid from cron.job where jobname = 'prune-raw-events')
  order by start_time desc limit 5;
+
+-- Step 3. What pruning would reclaim right now, and the table it would reclaim it from.
+-- This works regardless of steps 1-2 and is the only one of the three that measures
+-- OUTCOME rather than configuration.
+select count(*) as prunable_now from raw_events
+ where processed_at is not null and created_at < now() - interval '3 days';
+
+-- NOTE: the count(*) filters below are a full scan — slow on a bloated table.
+select pg_size_pretty(pg_total_relation_size('raw_events')) as total,
+       count(*) filter (where processed_at is not null) as processed,
+       count(*) filter (where processed_at is null)     as pending
+  from raw_events;
 ```
+
+Interpretation. **Step 1 returning zero rows means the pruner is not installed** — no job can be running, whatever `cron` would have said. That is the state stage was found in on 2026-09-02, with 16330 rows already eligible; the fix is to apply `deploy/sql/prune_raw_events.sql` — which installs the procedure *and* schedules the job — not to hunt for a broken schedule. It has to run as a privileged role (on Supabase, the SQL editor, which runs as `postgres`); the pooler role can neither create the extension nor schedule jobs. See [`docs/deployment.md`](../../../docs/deployment.md) § raw_events retention. `permission denied for schema cron` in step 2 means "cannot check from here", **not** "the job is missing" — confirm through the Supabase dashboard (Database → Cron) or a privileged role. A `prunable_now` that keeps climbing across days is the outcome-level symptom either way.
 
 **Remediation — mutates data, confirm with the user first** (out of scope for pure diagnosis):
 
 ```sql
-call public.prune_raw_events(interval '3 days', 10000);  -- manual prune run
+call public.prune_raw_events(interval '3 days', 10000);  -- only if step 1 found it
 vacuum (analyze) raw_events;                              -- after a big purge
 ```
 
@@ -129,5 +180,8 @@ vacuum (analyze) raw_events;                              -- after a big purge
 | Judging visibility by `approved` | Read API gates on `last_reconciled_at IS NOT NULL` (`markets` and `inference_markets`). |
 | Counting inference books without `superseded_at IS NULL` | Superseded books are excluded from the API and metrics. |
 | "Ingest is broken — no `OrderBook.Queued` / `PMP.StakeAccepted` rows" | Stage drops those types before insert (`config/indexer.stage.supabase.yaml` `ignored_event_types`). |
-| Blaming the dapp scope filter | `indexer.dapp_id` is unset in the stage config — no dapp filtering on stage; edges without `src_dapp_id` are always kept. |
+| "There is no dapp filtering, `indexer.dapp_id` is unset" | The config key is indeed unset, but scoping is not done there: the gateway query itself is parameterised by `src_dapp_id` and pinned to the compile-time `DEX_DAPP_ID`, so ingest is dapp-scoped server-side, at fetch. What the unset key means is only that no *additional* local filter runs. |
+| Reading a flat `undecodable` count as harmless background | No longer true since the registry ABIs were loaded: nothing that reaches a scoped `dst` is undecodable by design any more, so any row there is drift. |
+| `permission denied for schema cron` = "the job is missing" | It means the role cannot look. Check `pg_proc` for the procedure first — that IS readable, and its absence is the answer the `cron` query was being asked for. |
+| Matching a `dst` by suffix (`like '%2bf'`) | `dst_address` holds both routing ids and ordinary 64-hex contract addresses; a suffix match catches addresses that merely end the same way. Compare the full `':' \|\| lpad(to_hex(id),64,'0')`, or extract with `right(dst_address,16)`. |
 | `VACUUM FULL` during ops/cron | ACCESS EXCLUSIVE lock on the hot table. Use `vacuum (analyze)`. |
