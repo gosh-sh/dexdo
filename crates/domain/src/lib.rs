@@ -334,6 +334,64 @@ pub struct InferenceDepthSnapshot {
     pub asks: Vec<PriceLevel>,
 }
 
+/// Resting-liquidity predicate for the `/api/v1/inference/markets`
+/// `?liquidity=` filter. An `InferenceOrderBook` is one book per model, so
+/// unlike a prediction market there is no outcome dimension to quantify
+/// over: the question is simply whether the book itself quotes the side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum LiquidityFilter {
+    /// At least one open bid (someone is willing to buy ticks).
+    Buy,
+    /// At least one open ask (someone is willing to sell ticks).
+    Sell,
+    /// At least one open order on either side.
+    Any,
+    /// Both a bid and an ask rest on the book.
+    Both,
+}
+
+impl LiquidityFilter {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Buy => "BUY",
+            Self::Sell => "SELL",
+            Self::Any => "ANY",
+            Self::Both => "BOTH",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "BUY" => Some(Self::Buy),
+            "SELL" => Some(Self::Sell),
+            "ANY" => Some(Self::Any),
+            "BOTH" => Some(Self::Both),
+            _ => None,
+        }
+    }
+}
+
+/// Resting-liquidity totals for one `InferenceOrderBook`, behind
+/// `/api/v1/inference/liquidity`. Tick counts are summed over the open orders
+/// of each side and rendered on the book's display grid — the same scaling a
+/// depth level's quantity gets, so the two are directly comparable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InferenceLiquidity {
+    pub orderbook_address: String,
+    /// Version of the deployed order-book contract, mirroring
+    /// [`InferenceDepthSnapshot::contract_version`].
+    pub contract_version: Option<String>,
+    /// Total ticks resting on the bid side.
+    pub bid_ticks: String,
+    /// Total ticks resting on the ask side.
+    pub ask_ticks: String,
+    /// Number of open orders behind `bid_ticks`.
+    pub bid_orders: i64,
+    /// Number of open orders behind `ask_ticks`.
+    pub ask_orders: i64,
+}
+
 /// Seller rebate cap in bps (the contract's `REBATE_MAX_BPS`). Rendered as the
 /// negative `makerCommission` `"-0.02"`.
 pub const INFERENCE_MAKER_REBATE_CAP_BPS: u16 = 200;

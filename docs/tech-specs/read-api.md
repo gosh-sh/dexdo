@@ -22,6 +22,8 @@ Implementation-facing requirements for the HTTP layer that serves the market-dat
 
 **Depth** — the `/api/v1/prediction/depth` response for one market outcome: sorted bid and ask price levels plus `lastUpdateId`. It is built from `live_orders`, not by querying the OrderBook contract during the HTTP request.
 
+**Resting liquidity** — orders currently on a book: rows with `status = 'OPEN' AND amount_remaining > 0`, the same rows depth aggregates. On the inference side three readers share this one definition — [depth](#apiv1inferencedepth), the [`?liquidity=` listing filter](#resting-liquidity-filter-liquidity) and [`/api/v1/inference/liquidity`](#apiv1inferenceliquidity) — so they cannot disagree about what is on the book.
+
 **Trade tape** — a bare, newest-first list of maker↔taker matches built from an append-only table, never by querying the chain contract during the HTTP request. Two instances share this contract: `/api/v1/prediction/trades` (per market outcome, from the `trades` table) and `/api/v1/inference/trades` (per model order book, from the `inference_trades` table).
 
 **DTO** — Data Transfer Object. In this document it means the API response object after the backend has assembled it from database rows, but before it is serialized to JSON and sent to the client.
@@ -438,20 +440,33 @@ Per row: render `modelRefName` from `model_ref`, falling back to `model_hash` wh
 
 `contractVersion` is passed through verbatim from [`inference_markets.version`](data-schema.md#inference_markets) — the **contract** version reported by the book's `getVersion()` getter (e.g. `"4.0.30"`), the same column the reconciler parses as semver for cross-version supersede resolution. It is **not** a model version: `modelRefName` is the model's own label and carries whatever the book reports, and the two columns are kept distinct on purpose. `null` when the getter has not yet populated the column. No decode or validation — an unreconciled book is already hidden by the visibility gate, and whatever string the getter returned is served as-is.
 
+### Resting-liquidity filter (`?liquidity=`)
+
+`?liquidity=BUY|SELL|ANY|BOTH` keeps only books that currently have orders resting on them. "Resting" is `inference_orders.status = 'OPEN' AND amount_remaining > 0` — byte for byte the predicate [`/api/v1/inference/depth`](#apiv1inferencedepth) aggregates, so the two endpoints cannot disagree about what is on the book. Subscriptions are not excluded for the same reason: depth counts them, so the filter counts them.
+
+The predicate is an `EXISTS` semi-join on `inference_orders.orderbook_address`, emitted per side: `BUY` adds `AND io.is_buy`, `SELL` adds `AND NOT io.is_buy`, `ANY` constrains neither, `BOTH` emits two independent `EXISTS`. Two properties are load-bearing:
+
+- **Existential, never aggregate.** The semi-join stops at the first matching row, so the filter costs one index probe per candidate book instead of a scan of its book. Summing here would make the listing's cost proportional to every open order on every visible book — which is why the totals live in [`/api/v1/inference/liquidity`](#apiv1inferenceliquidity), scoped to a single book, and why the listing response carries no tick counts.
+- **No outcome dimension.** An `InferenceOrderBook` is one book per model, so `orderbook_address` plus a side is the whole key — exactly the leading edge of `inference_orders_liquidity_idx` (migration 0006). The prediction side needs an extra rule here (a market matches when *any* outcome quotes the side); the inference side does not.
+
+The side is an allow-listed enum (`LiquidityFilter::parse`) rendered as a literal SQL fragment; it consumes no bind parameter, so the listing's fixed `$1..$3` numbering is untouched. An unparseable value is `InvalidParameter` → 400. Unlike `status` — validated but not a predicate, since every visible row is `TRADING` — this one actually filters.
+
+Index backing is `inference_orders_liquidity_idx` (migration 0006): `(orderbook_address, is_buy) INCLUDE (amount_remaining)` under the partial predicate `status = 'OPEN' AND amount_remaining > 0`. Both callers filter on exactly that predicate, so the probe is an index-only scan. `inference_orders_open_book_idx` leads with the same two columns but carries neither the `amount_remaining > 0` predicate nor the value, so every candidate row would cost a heap fetch.
+
 ### Pagination
 
 Same cursor machinery as `/api/v1/prediction/markets` (URL-safe base64 of `"<sort_key>:<id>"`). One sort mode: `sort=createdAt` (default, DESC, key `created_at_chain`) — `resultStart` from the prediction side does not apply (inference markets have no result timing). A corrupted cursor → `InvalidParameter` → 400.
 
 ### Single-market mode
 
-`?inferenceOrderBookAddress=` returns exactly one market and is mutually exclusive with the list parameters (`status`, `sort`, `cursor`, `limit`) — passing both → `MissingParameter` → 400, mirroring [`/api/v1/prediction/markets`](#apiv1predictionmarkets)'s `predictionMarketAddress` single-market rule. An unknown or unreconciled address → `InvalidMarketOrSymbol` → 404. The response is the same market object built per [Building the response](#building-the-response-1), wrapped with `serverTime`.
+`?inferenceOrderBookAddress=` returns exactly one market and is mutually exclusive with the list parameters (`status`, `sort`, `liquidity`, `cursor`, `limit`) — passing both → `MissingParameter` → 400, mirroring [`/api/v1/prediction/markets`](#apiv1predictionmarkets)'s `predictionMarketAddress` single-market rule. An unknown or unreconciled address → `InvalidMarketOrSymbol` → 404. The response is the same market object built per [Building the response](#building-the-response-1), wrapped with `serverTime`.
 
 ### Error mapping
 
 | Condition | DomainError | HTTP |
 | --- | --- | --- |
 | `inferenceOrderBookAddress` unknown / not yet reconciled | `InvalidMarketOrSymbol` | 404 |
-| Invalid `status` / `sort` enum value | `InvalidParameter` | 400 |
+| Invalid `status` / `sort` / `liquidity` enum value | `InvalidParameter` | 400 |
 | `inferenceOrderBookAddress` together with list filters | `MissingParameter` | 400 |
 | Corrupted cursor | `InvalidParameter` | 400 |
 
@@ -495,6 +510,40 @@ Each side is then re-sorted in Rust with exact-numeric `BigUint` comparison (lex
 | Reconciled book with NULL/blank `orderbook_address` | `MarketInconsistent` | 503 |
 | Missing `inferenceOrderBookAddress` | `MissingParameter` | 400 |
 | Invalid `limit` (non-numeric) | `InvalidParameter` | 400 |
+
+## `/api/v1/inference/liquidity`
+
+Returns how many ticks are resting on one model's book, summed per side. It is the aggregate companion to [`/api/v1/inference/depth`](#apiv1inferencedepth): depth lists individual price levels, liquidity collapses the whole book into `bidTicks` / `askTicks` / `bidOrders` / `askOrders`. Public (`NONE`), read-model only — no contract call at request time. Public contract in [api-spec.md](../api-spec.md#inference-liquidity).
+
+### Scope
+
+`inferenceOrderBookAddress` is mandatory, and there is deliberately no all-books mode: the response aggregates a whole book, so an unscoped variant would let one unauthenticated request sum every open order on the exchange. The screening path is [`/api/v1/inference/markets?liquidity=`](#resting-liquidity-filter-liquidity) — an existential filter that stays O(1) per book — followed by this endpoint per book of interest.
+
+### Aggregation
+
+One SQL statement covers resolution and aggregation:
+
+1. `inference_markets` gated on `last_reconciled_at IS NOT NULL` — the same [visibility filter](#visibility-filter-1) the listing applies.
+2. `LEFT JOIN inference_orders` on `orderbook_address` with `status = 'OPEN' AND amount_remaining > 0` — the same definition of "resting" the depth aggregation and the `?liquidity=` filter use, so the three cannot disagree.
+3. `sum(amount_remaining) FILTER (WHERE …is_buy)` and `count(…) FILTER (…)` per side.
+
+The LEFT JOIN is what turns an empty book into zero totals instead of a missing row. Zero rows overall means the book is unknown or still behind the visibility gate — both collapse to `InvalidMarketOrSymbol` → 404, exactly as in depth, so a probe cannot tell them apart.
+
+Ticks are rendered like a depth level's quantity: `scale_uint_to_decimal` at the book's `quantity_precision`, which is `0` for a real book, so a tick total is a bare integer. A NULL precision on a reconciled row is read-model corruption and lifts to `MarketInconsistent` → 503 via `inference_scale` — the same guard depth uses — rather than being served as an unscaled number. That check runs on the row itself, so it fires on an empty book too.
+
+`contractVersion` is passed through from [`inference_markets.version`](data-schema.md#inference_markets), the same column and same contract-vs-model distinction as depth.
+
+### Empty-book contract
+
+A book with nothing resting returns `"0"` totals and zero counts, never a 404 — the same shape guarantee as depth's empty `bids`/`asks`.
+
+### Error mapping
+
+| Condition | DomainError | HTTP |
+| --- | --- | --- |
+| `inferenceOrderBookAddress` unknown or pre-reconcile | `InvalidMarketOrSymbol` | 404 |
+| Missing `inferenceOrderBookAddress` | `MissingParameter` | 400 |
+| NULL `quantity_precision` on a reconciled book | `MarketInconsistent` | 503 |
 
 ## `/api/v1/inference/orders`
 

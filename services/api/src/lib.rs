@@ -2346,6 +2346,10 @@ pub fn build_router(state: AppState) -> Router {
         .push(Router::with_path("api/v1/prediction/depth").get(get_depth))
         .push(Router::with_path("api/v1/inference/markets").get(inference::get_inference_markets))
         .push(Router::with_path("api/v1/inference/depth").get(inference::get_inference_depth))
+        .push(
+            Router::with_path("api/v1/inference/liquidity")
+                .get(inference::get_inference_liquidity),
+        )
         .push(Router::with_path("api/v1/inference/orders").get(inference::get_inference_orders))
         .push(Router::with_path("api/v1/inference/trades").get(inference::get_inference_trades))
         .push(Router::with_path("api/v1/oracles").get(get_oracles))
@@ -2408,6 +2412,9 @@ pub fn openapi_doc() -> OpenApi {
         .push(Router::with_path("api/v1/prediction/buyFullSet").post(buy_full_set))
         .push(Router::with_path("api/v1/inference/markets").get(inference::get_inference_markets))
         .push(Router::with_path("api/v1/inference/depth").get(inference::get_inference_depth))
+        .push(
+            Router::with_path("api/v1/inference/liquidity").get(inference::get_inference_liquidity),
+        )
         .push(Router::with_path("api/v1/inference/orders").get(inference::get_inference_orders))
         .push(Router::with_path("api/v1/inference/trades").get(inference::get_inference_trades));
 

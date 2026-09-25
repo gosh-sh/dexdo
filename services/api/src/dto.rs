@@ -202,6 +202,35 @@ pub(crate) enum QueryableOrderStatus {
     Rejected,
 }
 
+/// Values accepted by the `GET /api/v1/inference/markets` `liquidity`
+/// filter. An `InferenceOrderBook` is one book per model, so the filter
+/// asks about the book itself — there is no outcome dimension the way
+/// there is on a prediction market.
+// Documentation-only, same rationale as `MarketsSort`: the handler parses
+// the raw string through `LiquidityFilter::parse` so missing-vs-invalid
+// error fidelity survives.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, Serialize, ToSchema)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub(crate) enum LiquidityFilter {
+    Buy,
+    Sell,
+    Any,
+    Both,
+}
+
+impl From<dodex_domain::LiquidityFilter> for LiquidityFilter {
+    fn from(value: dodex_domain::LiquidityFilter) -> Self {
+        use dodex_domain::LiquidityFilter as D;
+        match value {
+            D::Buy => Self::Buy,
+            D::Sell => Self::Sell,
+            D::Any => Self::Any,
+            D::Both => Self::Both,
+        }
+    }
+}
+
 /// Order statuses accepted by the `GET /api/v1/inference/orders` `status` filter.
 /// `LIVE` means currently resting; see docs/api-spec.md §Inference Orders.
 /// Shapes the OpenAPI `status` parameter's allowed values; the handler passes the raw CSV
@@ -340,6 +369,18 @@ mod wire_value_tests {
             assert_eq!(wire(variant), expected);
             dodex_application::OrderStatusFilter::from_csv(Some(expected))
                 .expect("filter accepts the documented value");
+        }
+    }
+
+    // The documented values must be exactly the ones the handler's parser
+    // accepts — otherwise the spec advertises a filter vocabulary the
+    // server rejects with -1130.
+    #[test]
+    fn liquidity_filter_matches_domain_parser() {
+        use dodex_domain::LiquidityFilter as D;
+        for d in [D::Buy, D::Sell, D::Any, D::Both] {
+            assert_eq!(wire(LiquidityFilter::from(d)), d.as_str());
+            assert_eq!(D::parse(d.as_str()), Some(d));
         }
     }
 

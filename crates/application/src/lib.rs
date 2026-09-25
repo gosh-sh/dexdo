@@ -14,7 +14,9 @@ use dodex_domain::precision_within;
 use dodex_domain::DepthSnapshot;
 use dodex_domain::DomainError;
 use dodex_domain::InferenceDepthSnapshot;
+use dodex_domain::InferenceLiquidity;
 use dodex_domain::InferenceMarketsPage;
+use dodex_domain::LiquidityFilter;
 use dodex_domain::MarketAddress;
 use dodex_domain::MarketStatus;
 use dodex_domain::MarketsPage;
@@ -143,11 +145,16 @@ pub enum InferenceMarketsSort {
     CreatedAtDesc,
 }
 
-/// No filter field: the listing's only filter was `producer`, and it went with
-/// the parsed model-name parts it read. `status` has never been a predicate —
-/// TRADING is the only value — so what remains is sort, cursor and limit.
+/// `status` has never been a predicate — TRADING is the only value — and the
+/// old `producer` filter went with the parsed model-name parts it read. The
+/// one filter that remains is `liquidity`, which reads `inference_orders`
+/// rather than any column on the market row.
 #[derive(Debug, Clone)]
 pub struct InferenceMarketsListing {
+    /// Keep only books that currently hold resting liquidity of the requested
+    /// side. Backs `?liquidity=`. Existential — it says a side is quoted, not
+    /// how deep it is; totals live behind `/api/v1/inference/liquidity`.
+    pub liquidity: Option<LiquidityFilter>,
     pub sort: InferenceMarketsSort,
     pub cursor: Option<String>,
     pub limit: u16,
@@ -755,6 +762,16 @@ pub trait InferenceReadRepository: Send + Sync {
         limit: u16,
     ) -> Result<InferenceDepthSnapshot, anyhow::Error>;
 
+    /// Resting-liquidity totals for one book: ticks and order counts per side.
+    /// Resolution and error mapping mirror
+    /// [`get_inference_depth`](Self::get_inference_depth) — unknown /
+    /// unreconciled address → `InvalidMarketOrSymbol`, corrupt read-model data
+    /// → `MarketInconsistent`. An empty book is zero totals, not an error.
+    async fn get_inference_liquidity(
+        &self,
+        orderbook_address: &str,
+    ) -> Result<InferenceLiquidity, anyhow::Error>;
+
     /// List a book's orders. Unknown / unreconciled address → `InvalidMarketOrSymbol`.
     /// A book whose view the indexer cannot vouch for yields `MarketInconsistent` for
     /// queries that ask about a TokenContract among live SELLs — see the fail-closed gate
@@ -789,6 +806,13 @@ impl<T: ?Sized + InferenceReadRepository> InferenceReadRepository for Arc<T> {
         limit: u16,
     ) -> Result<InferenceDepthSnapshot, anyhow::Error> {
         (**self).get_inference_depth(orderbook_address, limit).await
+    }
+
+    async fn get_inference_liquidity(
+        &self,
+        orderbook_address: &str,
+    ) -> Result<InferenceLiquidity, anyhow::Error> {
+        (**self).get_inference_liquidity(orderbook_address).await
     }
 
     async fn list_inference_orders(
@@ -1235,6 +1259,33 @@ where
         query: GetInferenceDepthQuery,
     ) -> Result<InferenceDepthSnapshot, anyhow::Error> {
         self.repo.get_inference_depth(&query.orderbook_address, query.limit).await
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GetInferenceLiquidityQuery {
+    pub orderbook_address: String,
+}
+
+pub struct GetInferenceLiquidityUseCase<R> {
+    repo: R,
+}
+
+impl<R> GetInferenceLiquidityUseCase<R> {
+    pub fn new(repo: R) -> Self {
+        Self { repo }
+    }
+}
+
+impl<R> GetInferenceLiquidityUseCase<R>
+where
+    R: InferenceReadRepository,
+{
+    pub async fn execute(
+        &self,
+        query: GetInferenceLiquidityQuery,
+    ) -> Result<InferenceLiquidity, anyhow::Error> {
+        self.repo.get_inference_liquidity(&query.orderbook_address).await
     }
 }
 
@@ -7206,6 +7257,7 @@ mod inference_usecase_tests {
 
     use async_trait::async_trait;
     use dodex_domain::InferenceDepthSnapshot;
+    use dodex_domain::InferenceLiquidity;
     use dodex_domain::InferenceMarketsPage;
 
     use super::DomainError;
@@ -7269,6 +7321,20 @@ mod inference_usecase_tests {
                 last_update_id: limit.to_string(),
                 bids: vec![],
                 asks: vec![],
+            })
+        }
+
+        async fn get_inference_liquidity(
+            &self,
+            orderbook_address: &str,
+        ) -> Result<InferenceLiquidity, anyhow::Error> {
+            Ok(InferenceLiquidity {
+                orderbook_address: orderbook_address.to_string(),
+                contract_version: None,
+                bid_ticks: "0".to_string(),
+                ask_ticks: "0".to_string(),
+                bid_orders: 0,
+                ask_orders: 0,
             })
         }
 

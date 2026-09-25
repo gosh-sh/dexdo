@@ -27,7 +27,9 @@
       - [OracleOutcome](#oracleoutcome)
   - [Inference Market Data](#inference-market-data)
     - [Inference Markets](#inference-markets)
+      - [Liquidity filter](#liquidity-filter)
     - [Inference Depth](#inference-depth)
+    - [Inference Liquidity](#inference-liquidity)
     - [Inference Orders](#inference-orders)
     - [Inference Trades](#inference-trades)
   - [Account Endpoints](#account-endpoints)
@@ -224,6 +226,7 @@ envelope field failed or why a credential was rejected.
 | Fetch recent prediction trades | `GET` | `/api/v1/prediction/trades` | `NONE` |
 | List inference markets (tradable models) | `GET` | `/api/v1/inference/markets` | `NONE` |
 | Fetch inference order book (depth) | `GET` | `/api/v1/inference/depth` | `NONE` |
+| Fetch inference order book liquidity | `GET` | `/api/v1/inference/liquidity` | `NONE` |
 | List inference orders | `GET` | `/api/v1/inference/orders` | `NONE` |
 | Fetch recent inference trades | `GET` | `/api/v1/inference/trades` | `NONE` |
 | Register a trading account from a PrivateNote | `POST` | `/api/v1/accounts` | `NONE` |
@@ -821,7 +824,7 @@ Response fields:
 
 Market data for the **private-inference market**: tradable AI models and the prediction markets settled from their prices. The unit of trade is an **inference tick** — one unit of model generation — priced **per tick in `SHELL`**. Each model has exactly one order book; there is no `symbol` dimension (unlike prediction-market depth, which is per outcome).
 
-All four endpoints are public (`NONE`), read-only, and eventually consistent — a just-placed order or a fresh reference price may briefly lag the chain.
+All five endpoints are public (`NONE`), read-only, and eventually consistent — a just-placed order or a fresh reference price may briefly lag the chain.
 
 ### Inference Markets
 
@@ -838,6 +841,7 @@ Query parameters:
 | `inferenceOrderBookAddress` | STRING | NO | Return one market only. Mutually exclusive with the filter and pagination parameters below. |
 | `status` | STRING | NO | Comma-separated statuses to include. Currently only `TRADING`. |
 | `sort` | STRING | NO | Sort field. `createdAt` (default, DESC). |
+| `liquidity` | ENUM | NO | Return only books that currently hold resting liquidity. One of: `BUY` (at least one open bid), `SELL` (at least one open ask), `ANY` (either side), `BOTH` (a bid **and** an ask). See [Liquidity filter](#liquidity-filter). |
 | `cursor` | STRING | NO | Opaque pagination cursor from a previous call. |
 | `limit` | INT | NO | Page size. Default: `50`. Max: `200`. |
 
@@ -896,9 +900,26 @@ Errors:
 | Condition | Code | HTTP |
 | --- | --- | --- |
 | `inferenceOrderBookAddress` together with filter/pagination params | `-1102` | 400 |
-| Invalid `status` / `sort` value | `-1130` | 400 |
+| Invalid `status` / `sort` / `liquidity` value | `-1130` | 400 |
 | Corrupted `cursor` | `-1130` | 400 |
 | `inferenceOrderBookAddress` not found | `-1121` | 404 |
+
+#### Liquidity filter
+
+`?liquidity=` keeps only books that currently have orders resting on them. An order counts when it is open and still has ticks left — exactly the orders [`/api/v1/inference/depth`](#inference-depth) would show. Filled and cancelled orders never count, and neither does an order whose ticks are all delivered.
+
+| Value | A book is returned when |
+| --- | --- |
+| `BUY` | at least one open bid rests on it |
+| `SELL` | at least one open ask rests on it |
+| `ANY` | at least one open order rests on it, either side |
+| `BOTH` | at least one bid **and** at least one ask rest on it |
+
+Each model has exactly one order book, so the question is simply whether that book quotes the side — there is no outcome dimension the way there is on a prediction market.
+
+The filter answers "is this side quoted", not "how much is quoted": the response carries no tick counts. For totals, call [`/api/v1/inference/liquidity`](#inference-liquidity) on a book.
+
+Any other value is rejected with `-1130 / 400`. Like the other listing parameters, `liquidity` MUST NOT be combined with `inferenceOrderBookAddress` (`-1102 / 400`) — presence alone conflicts, so even an empty `&liquidity=` is refused.
 
 ### Inference Depth
 
@@ -950,6 +971,58 @@ Errors:
 | Book data temporarily inconsistent | `-1500` | 503 |
 
 > **Prediction markets settled from a model price** are regular prediction markets, listed by [`/api/v1/prediction/markets`](#prediction-markets) — filter with `?resolvesFrom=<inferenceOrderBookAddress>` and read the per-market `resolvesFrom` block. See [Markets](#prediction-markets).
+
+### Inference Liquidity
+
+```http
+GET /api/v1/inference/liquidity
+```
+
+Fetch how many ticks are resting on one model's book, summed per side. This is the aggregate companion to [`/api/v1/inference/depth`](#inference-depth): depth lists the individual price levels, liquidity collapses the whole book into four numbers. The same orders are counted — open, with ticks remaining.
+
+The endpoint is scoped to one book by design; there is no all-books mode. Screen with [`/api/v1/inference/markets?liquidity=`](#liquidity-filter) first, then read totals for the books you kept.
+
+Query parameters:
+
+| Name | Type | Mandatory | Description |
+| --- | --- | --- | --- |
+| `inferenceOrderBookAddress` | STRING | YES | The model's order-book address from [`/api/v1/inference/markets`](#inference-markets). |
+
+Response:
+
+```json
+{
+  "serverTime": 1710000000,
+  "inferenceOrderBookAddress": "0:ob-addr...",
+  "contractVersion": "4.0.30",
+  "bidTicks": "420",
+  "askTicks": "290",
+  "bidOrders": 2,
+  "askOrders": 1
+}
+```
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `serverTime` | LONG | Unix seconds, captured once for the request. |
+| `inferenceOrderBookAddress` | STRING | The book's address, echoed from the request. |
+| `contractVersion` | STRING \| null | Version of the deployed order-book contract. Same value [`/api/v1/inference/depth`](#inference-depth) reports for this book; `null` when not yet known on chain. |
+| `bidTicks` | DECIMAL | Total ticks resting on the bid side, summed over all open buy orders. Scaled by the book's `quantityPrecision` — the same units as a depth level's tick count. |
+| `askTicks` | DECIMAL | Same for the ask side. |
+| `bidOrders` | INT | Number of open orders behind `bidTicks`. |
+| `askOrders` | INT | Number of open orders behind `askTicks`. |
+
+Subscriptions are ordinary orders here: depth counts them, so these totals count them.
+
+Errors:
+
+| Condition | Code | HTTP |
+| --- | --- | --- |
+| `inferenceOrderBookAddress` missing or blank | `-1102` | 400 |
+| `inferenceOrderBookAddress` not found / not yet available | `-1121` | 404 |
+| Book data temporarily inconsistent | `-1500` | 503 |
+
+A book with nothing resting returns `200` with `"0"` totals and zero counts — the same empty-book contract as depth, not a `404`.
 
 ### Inference Orders
 

@@ -103,6 +103,7 @@ async fn listing_head(
     for _ in 0..pages {
         let page = repo
             .list_inference_markets(&InferenceMarketsRequest::Listing(InferenceMarketsListing {
+                liquidity: None,
                 sort: InferenceMarketsSort::CreatedAtDesc,
                 cursor: cursor.take(),
                 limit: page_size,

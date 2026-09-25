@@ -197,6 +197,34 @@ paths:
                 $ref: '#/components/schemas/ErrorBody'
       security:
       - {}
+  /api/v1/inference/liquidity:
+    get:
+      tags:
+      - inference-market-data
+      summary: Inference order book liquidity
+      operationId: get_inference_liquidity
+      parameters:
+      - name: inferenceOrderBookAddress
+        in: query
+        description: The model's order-book address.
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response with json format data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InferenceLiquidityResponse'
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+      security:
+      - {}
   /api/v1/inference/markets:
     get:
       tags:
@@ -228,6 +256,14 @@ paths:
           type:
           - string
           - 'null'
+      - name: liquidity
+        in: query
+        description: 'Return only books currently holding resting liquidity of this side. Totals: /api/v1/inference/liquidity.'
+        required: false
+        schema:
+          allOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/LiquidityFilter'
       - name: cursor
         in: query
         description: Opaque pagination cursor from a previous call.
@@ -1444,6 +1480,45 @@ components:
         lastUpdateId:
           type: string
           description: Opaque lex-comparable chain-order cursor; empty when no order has landed.
+    InferenceLiquidityResponse:
+      type: object
+      required:
+      - serverTime
+      - inferenceOrderBookAddress
+      - bidTicks
+      - askTicks
+      - bidOrders
+      - askOrders
+      properties:
+        askOrders:
+          type: integer
+          format: int64
+          description: Number of open orders behind `askTicks`.
+        askTicks:
+          type: string
+          description: Total ticks resting on the ask side.
+        bidOrders:
+          type: integer
+          format: int64
+          description: Number of open orders behind `bidTicks`.
+        bidTicks:
+          type: string
+          description: |-
+            Total ticks resting on the bid side, summed over every open buy order.
+            Same scale as a `/api/v1/inference/depth` level's tick count.
+        contractVersion:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Version of the deployed order-book contract for this book; `null` when
+            not yet known on chain.
+        inferenceOrderBookAddress:
+          type: string
+        serverTime:
+          type: integer
+          format: int64
+          description: Unix seconds, captured once for the request.
     InferenceMarketDto:
       type: object
       required:
@@ -1668,6 +1743,18 @@ components:
           description: |-
             Opaque, lex-comparable id for the match — the chain order of the
             `InferenceFilled` event that recorded it. Shared by both sides of the match.
+    LiquidityFilter:
+      type: string
+      description: |-
+        Values accepted by the `GET /api/v1/inference/markets` `liquidity`
+        filter. An `InferenceOrderBook` is one book per model, so the filter
+        asks about the book itself — there is no outcome dimension the way
+        there is on a prediction market.
+      enum:
+      - BUY
+      - SELL
+      - ANY
+      - BOTH
     MarketBalancesResponse:
       type: object
       required:

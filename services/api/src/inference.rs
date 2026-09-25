@@ -4,6 +4,8 @@
 
 use dodex_application::GetInferenceDepthQuery;
 use dodex_application::GetInferenceDepthUseCase;
+use dodex_application::GetInferenceLiquidityQuery;
+use dodex_application::GetInferenceLiquidityUseCase;
 use dodex_application::GetInferenceMarketsUseCase;
 use dodex_application::GetInferenceOrdersInput;
 use dodex_application::GetInferenceOrdersUseCase;
@@ -15,6 +17,7 @@ use dodex_application::InferenceMarketsSort;
 use dodex_domain::DomainError;
 use dodex_domain::InferenceMarket;
 use dodex_domain::InferenceMarketStatus;
+use dodex_domain::LiquidityFilter;
 use dodex_domain::Trade;
 use salvo::prelude::*;
 use salvo::writing::Json;
@@ -96,6 +99,7 @@ impl From<InferenceMarketStatus> for InferenceMarketStatusDto {
         ("inferenceOrderBookAddress" = Option<String>, Query, description = "Single-market lookup. Mutually exclusive with filters and pagination."),
         ("status" = Option<String>, Query, description = "Comma-separated statuses to include. Currently only TRADING."),
         ("sort" = Option<String>, Query, description = "Sort field. createdAt (default, DESC)."),
+        ("liquidity" = Option<dto::LiquidityFilter>, Query, description = "Return only books currently holding resting liquidity of this side. Totals: /api/v1/inference/liquidity."),
         ("cursor" = Option<String>, Query, description = "Opaque pagination cursor from a previous call."),
         ("limit" = Option<i64>, Query, minimum = 1, maximum = 200, description = "Page size. Default 50, max 200; out-of-range values clamp."),
     ),
@@ -145,8 +149,9 @@ fn build_inference_markets_request(req: &mut Request) -> Result<InferenceMarkets
         // the typed parse, so the conflict is always -1102, never -1130 or a
         // silent single-market success. (Intentionally stricter than
         // prediction's `build_markets_request`.)
-        let conflicting =
-            ["status", "sort", "cursor", "limit"].iter().any(|&k| req.query::<String>(k).is_some());
+        let conflicting = ["status", "sort", "cursor", "limit", "liquidity"]
+            .iter()
+            .any(|&k| req.query::<String>(k).is_some());
         if conflicting {
             return Err(ApiError::from(DomainError::MissingParameter));
         }
@@ -170,11 +175,17 @@ fn build_inference_markets_request(req: &mut Request) -> Result<InferenceMarkets
         None | Some("createdAt") => InferenceMarketsSort::CreatedAtDesc,
         Some(_) => return Err(ApiError::from(DomainError::InvalidParameter)),
     };
+    // Unlike `status`, this one is a real predicate: an unknown token is -1130
+    // rather than a silently ignored no-op.
+    let liquidity = non_empty_query(req, "liquidity")
+        .as_deref()
+        .map(|v| LiquidityFilter::parse(v).ok_or(ApiError::from(DomainError::InvalidParameter)))
+        .transpose()?;
     let limit = optional_typed_query::<i64>(req, "limit")?
         .map(|v| v.clamp(1, INFERENCE_MAX_LIMIT as i64) as u16)
         .unwrap_or(INFERENCE_DEFAULT_LIMIT);
 
-    Ok(InferenceMarketsRequest::Listing(InferenceMarketsListing { sort, cursor, limit }))
+    Ok(InferenceMarketsRequest::Listing(InferenceMarketsListing { liquidity, sort, cursor, limit }))
 }
 
 fn inference_market_to_dto(m: InferenceMarket) -> InferenceMarketDto {
@@ -282,6 +293,76 @@ pub(crate) async fn get_inference_depth(
         last_update_id: snapshot.last_update_id,
         bids: snapshot.bids.into_iter().map(|l| [l.price, l.quantity]).collect(),
         asks: snapshot.asks.into_iter().map(|l| [l.price, l.quantity]).collect(),
+    }))
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct InferenceLiquidityResponse {
+    /// Unix seconds, captured once for the request.
+    server_time: i64,
+    #[serde(rename = "inferenceOrderBookAddress")]
+    orderbook_address: String,
+    /// Version of the deployed order-book contract for this book; `null` when
+    /// not yet known on chain.
+    contract_version: Option<String>,
+    /// Total ticks resting on the bid side, summed over every open buy order.
+    /// Same scale as a `/api/v1/inference/depth` level's tick count.
+    bid_ticks: String,
+    /// Total ticks resting on the ask side.
+    ask_ticks: String,
+    /// Number of open orders behind `bidTicks`.
+    bid_orders: i64,
+    /// Number of open orders behind `askTicks`.
+    ask_orders: i64,
+}
+
+/// Resting-liquidity totals for one model's book.
+#[endpoint(
+    tags("inference-market-data"),
+    summary = "Inference order book liquidity",
+    parameters(
+        ("inferenceOrderBookAddress" = String, Query, description = "The model's order-book address."),
+    ),
+    security(()),
+)]
+pub(crate) async fn get_inference_liquidity(
+    req: &mut Request,
+    depot: &mut Depot,
+) -> Result<Json<InferenceLiquidityResponse>, ApiError> {
+    let state = depot
+        .obtain::<AppState>()
+        .map_err(|err| {
+            error!(?err, "missing AppState in depot");
+            ApiError::from(DomainError::Unexpected)
+        })?
+        .clone();
+    let inference_repo = state.inference_repo.clone().ok_or_else(|| {
+        error!("inference_repo not wired in AppState");
+        ApiError::from(DomainError::Unexpected)
+    })?;
+
+    // Book-scoped by contract: the response aggregates a whole book, so an
+    // all-books mode would let one unauthenticated request sum every open
+    // order on the exchange. Clients screen with
+    // `/api/v1/inference/markets?liquidity=`, then read totals per book.
+    let address = non_empty_query(req, "inferenceOrderBookAddress")
+        .ok_or(ApiError::from(DomainError::MissingParameter))?;
+
+    let use_case = GetInferenceLiquidityUseCase::new(inference_repo);
+    let liquidity = use_case
+        .execute(GetInferenceLiquidityQuery { orderbook_address: address })
+        .await
+        .map_err(|err| map_domain_or_unexpected(err, "get_inference_liquidity"))?;
+
+    Ok(Json(InferenceLiquidityResponse {
+        server_time: now_seconds(),
+        orderbook_address: liquidity.orderbook_address,
+        contract_version: liquidity.contract_version,
+        bid_ticks: liquidity.bid_ticks,
+        ask_ticks: liquidity.ask_ticks,
+        bid_orders: liquidity.bid_orders,
+        ask_orders: liquidity.ask_orders,
     }))
 }
 
