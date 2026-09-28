@@ -374,6 +374,14 @@ paths:
           type:
           - string
           - 'null'
+      - name: includeExpired
+        in: query
+        description: Include LIVE rows whose deadline has already passed. Default false — such an order is no longer matchable.
+        required: false
+        schema:
+          type:
+          - boolean
+          - 'null'
       responses:
         '200':
           description: Response with json format data

@@ -52,6 +52,11 @@ const CHAIN_TIME: i64 = 1_700_000_500;
 /// else is seeded.
 const LISTING_LIMIT: u16 = 200;
 
+/// Request clock for every read below. Fixed rather than wall-clock so the
+/// deadline cases are deterministic: a book seeded with `NOW - 1` is expired
+/// on every run, and one with `NOW + 1` never is.
+const NOW: i64 = 1_700_001_000;
+
 fn ob_of(tag: &str) -> String {
     format!("0:inf_liq_{tag}")
 }
@@ -95,6 +100,7 @@ async fn seed_book(pool: &PgPool, tag: &str, created_at_chain_secs: i64) {
 /// counts; `status` lets a test place a closed order that must not register as
 /// liquidity, and `is_subscription` pins that subscriptions count exactly as
 /// depth counts them.
+#[allow(clippy::too_many_arguments)]
 async fn seed_order(
     pool: &PgPool,
     tag: &str,
@@ -103,13 +109,15 @@ async fn seed_order(
     amount_remaining: &str,
     status: &str,
     is_subscription: bool,
+    deadline: Option<i64>,
 ) {
     sqlx::query(
         r#"insert into inference_orders
                (orderbook_address, order_id, is_buy, price,
-                amount_initial, amount_remaining, status, is_subscription, last_chain_order)
+                amount_initial, amount_remaining, status, is_subscription,
+                deadline, last_chain_order)
            values ($1, $2::numeric, $3, 1000::numeric,
-                   1000::numeric, $4::numeric, $5, $6, $7)"#,
+                   1000::numeric, $4::numeric, $5, $6, $7::numeric, $8)"#,
     )
     .bind(ob_of(tag))
     .bind(order_id)
@@ -117,14 +125,29 @@ async fn seed_order(
     .bind(amount_remaining)
     .bind(status)
     .bind(is_subscription)
+    .bind(deadline)
     .bind(format!("{order_id:04}"))
     .execute(pool)
     .await
     .expect("insert inference_order");
 }
 
+/// An open order with no deadline — the chain's `0`, good-till-cancel, which
+/// never expires.
 async fn open_order(pool: &PgPool, tag: &str, order_id: i64, is_buy: bool, ticks: &str) {
-    seed_order(pool, tag, order_id, is_buy, ticks, "OPEN", false).await;
+    seed_order(pool, tag, order_id, is_buy, ticks, "OPEN", false, None).await;
+}
+
+/// An open order that expires at `deadline` (unix seconds).
+async fn open_order_until(
+    pool: &PgPool,
+    tag: &str,
+    order_id: i64,
+    is_buy: bool,
+    ticks: &str,
+    deadline: i64,
+) {
+    seed_order(pool, tag, order_id, is_buy, ticks, "OPEN", false, Some(deadline)).await;
 }
 
 /// Assert which of this suite's books a `?liquidity=` listing does and does
@@ -143,6 +166,7 @@ async fn assert_listing(pool: &PgPool, filter: LiquidityFilter, present: &[&str]
             sort: InferenceMarketsSort::CreatedAtDesc,
             cursor: None,
             limit: LISTING_LIMIT,
+            now: NOW,
         }))
         .await
         .expect("listing");
@@ -158,7 +182,7 @@ async fn assert_listing(pool: &PgPool, filter: LiquidityFilter, present: &[&str]
 
 async fn liquidity(pool: &PgPool, tag: &str) -> Result<InferenceLiquidity, anyhow::Error> {
     let repo = PostgresReadModelRepository::new(pool.clone());
-    repo.get_inference_liquidity(&ob_of(tag)).await
+    repo.get_inference_liquidity(&ob_of(tag), NOW).await
 }
 
 /// The four books every filter test shares: one quoting each side, one quoting
@@ -221,9 +245,9 @@ async fn closed_and_exhausted_orders_are_not_liquidity() {
     seed_book(&pool, "closed", CHAIN_TIME).await;
     // Nothing here rests: a filled order, a cancelled one, and an OPEN row the
     // projector left at zero remaining.
-    seed_order(&pool, "closed", 1, true, "100", "FILLED", false).await;
-    seed_order(&pool, "closed", 2, false, "100", "CANCELLED", false).await;
-    seed_order(&pool, "closed", 3, true, "0", "OPEN", false).await;
+    seed_order(&pool, "closed", 1, true, "100", "FILLED", false, None).await;
+    seed_order(&pool, "closed", 2, false, "100", "CANCELLED", false, None).await;
+    seed_order(&pool, "closed", 3, true, "0", "OPEN", false, None).await;
 
     assert_listing(&pool, LiquidityFilter::Any, &[], &["closed"]).await;
 
@@ -244,7 +268,7 @@ async fn totals_sum_ticks_and_orders_per_side() {
     open_order(&pool, "totals", 3, false, "25").await;
     // A subscription is an order like any other here — depth counts it, so this
     // counts it. Excluding it would make the two endpoints disagree.
-    seed_order(&pool, "totals", 4, false, "5", "OPEN", true).await;
+    seed_order(&pool, "totals", 4, false, "5", "OPEN", true, None).await;
 
     let liq = liquidity(&pool, "totals").await.expect("liquidity");
     assert_eq!(liq.orderbook_address, ob_of("totals"));
@@ -290,8 +314,10 @@ async fn totals_carry_the_contract_version() {
 async fn totals_reject_an_unknown_book() {
     let Some(pool) = setup().await else { return };
     let repo = PostgresReadModelRepository::new(pool.clone());
-    let err =
-        repo.get_inference_liquidity("0:inf_liq_no_such_book").await.expect_err("unknown book");
+    let err = repo
+        .get_inference_liquidity("0:inf_liq_no_such_book", NOW)
+        .await
+        .expect_err("unknown book");
     assert!(matches!(err.downcast_ref::<DomainError>(), Some(DomainError::InvalidMarketOrSymbol)));
 }
 
@@ -342,4 +368,100 @@ async fn null_quantity_precision_fails_closed() {
         .execute(&pool)
         .await
         .expect("purge the corrupt fixture");
+}
+
+// ---------------------------------------------------------------------------
+// Expiry. The book skips a maker past its deadline when matching (`_isExpired`
+// in InferenceOrderBook.sol: `deadline != 0 && block.timestamp >= deadline`),
+// so such an order is not liquidity even while its stored status is still
+// OPEN — the chain has simply not emitted `InferenceOrderExpired` yet.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_past_deadline_order_is_not_liquidity() {
+    let Some(pool) = setup().await else { return };
+    seed_book(&pool, "stale", CHAIN_TIME).await;
+    // The only order on the book lapsed one second ago.
+    open_order_until(&pool, "stale", 1, true, "100", NOW - 1).await;
+
+    // Gone from the filter...
+    assert_listing(&pool, LiquidityFilter::Any, &[], &["stale"]).await;
+    assert_listing(&pool, LiquidityFilter::Buy, &[], &["stale"]).await;
+
+    // ...and from the totals, which read the same book.
+    let liq = liquidity(&pool, "stale").await.expect("liquidity");
+    assert_eq!(liq.bid_ticks, "0", "a lapsed order is not resting ticks");
+    assert_eq!(liq.bid_orders, 0);
+}
+
+#[tokio::test]
+async fn the_expiry_boundary_matches_the_contract() {
+    let Some(pool) = setup().await else { return };
+    // `_isExpired` is `block.timestamp >= deadline`, so a deadline exactly at
+    // `now` has already passed and one a second later has not.
+    seed_book(&pool, "boundary_at", CHAIN_TIME).await;
+    open_order_until(&pool, "boundary_at", 1, true, "100", NOW).await;
+    seed_book(&pool, "boundary_after", CHAIN_TIME).await;
+    open_order_until(&pool, "boundary_after", 1, true, "100", NOW + 1).await;
+
+    assert_listing(&pool, LiquidityFilter::Buy, &["boundary_after"], &["boundary_at"]).await;
+    assert_eq!(liquidity(&pool, "boundary_at").await.expect("liquidity").bid_ticks, "0");
+    assert_eq!(liquidity(&pool, "boundary_after").await.expect("liquidity").bid_ticks, "100");
+}
+
+#[tokio::test]
+async fn a_null_deadline_never_expires() {
+    let Some(pool) = setup().await else { return };
+    // NULL is the chain's `0`: good-till-cancel. It must survive any clock.
+    seed_book(&pool, "gtc", CHAIN_TIME).await;
+    open_order(&pool, "gtc", 1, true, "100").await;
+
+    assert_listing(&pool, LiquidityFilter::Buy, &["gtc"], &[]).await;
+    assert_eq!(liquidity(&pool, "gtc").await.expect("liquidity").bid_ticks, "100");
+}
+
+#[tokio::test]
+async fn expiry_is_counted_per_side() {
+    let Some(pool) = setup().await else { return };
+    // The bid has lapsed, the ask has not: the book quotes one side only, so
+    // BOTH must stop matching it while SELL still does.
+    seed_book(&pool, "half_stale", CHAIN_TIME).await;
+    open_order_until(&pool, "half_stale", 1, true, "100", NOW - 1).await;
+    open_order_until(&pool, "half_stale", 2, false, "70", NOW + 1000).await;
+
+    assert_listing(&pool, LiquidityFilter::Sell, &["half_stale"], &[]).await;
+    assert_listing(&pool, LiquidityFilter::Buy, &[], &["half_stale"]).await;
+    assert_listing(&pool, LiquidityFilter::Both, &[], &["half_stale"]).await;
+    assert_listing(&pool, LiquidityFilter::Any, &["half_stale"], &[]).await;
+
+    let liq = liquidity(&pool, "half_stale").await.expect("liquidity");
+    assert_eq!(liq.bid_ticks, "0");
+    assert_eq!(liq.bid_orders, 0);
+    assert_eq!(liq.ask_ticks, "70");
+    assert_eq!(liq.ask_orders, 1);
+}
+
+#[tokio::test]
+async fn depth_and_liquidity_agree_about_what_is_resting() {
+    let Some(pool) = setup().await else { return };
+    // The invariant the whole design rests on: one definition of resting,
+    // three readers. Seed a book where every exclusion rule fires at once and
+    // check depth reports exactly what the totals do.
+    seed_book(&pool, "agree", CHAIN_TIME).await;
+    open_order(&pool, "agree", 1, true, "100").await; // counts
+    open_order_until(&pool, "agree", 2, true, "50", NOW + 1000).await; // counts
+    open_order_until(&pool, "agree", 3, true, "999", NOW - 1).await; // lapsed
+    seed_order(&pool, "agree", 4, true, "999", "CANCELLED", false, None).await; // closed
+    seed_order(&pool, "agree", 5, true, "0", "OPEN", false, None).await; // exhausted
+
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let depth = repo.get_inference_depth(&ob_of("agree"), 100, NOW).await.expect("depth");
+    // Both survivors rest at the same price, so they collapse into one level.
+    let depth_bid_ticks: u64 =
+        depth.bids.iter().map(|l| l.quantity.parse::<u64>().expect("integer ticks")).sum();
+    assert_eq!(depth_bid_ticks, 150);
+
+    let liq = liquidity(&pool, "agree").await.expect("liquidity");
+    assert_eq!(liq.bid_ticks, depth_bid_ticks.to_string(), "depth and totals must agree");
+    assert_eq!(liq.bid_orders, 2);
 }

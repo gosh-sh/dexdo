@@ -145,13 +145,15 @@ impl PostgresReadModelRepository {
                       id desc \
              limit $3"
         );
-        let mut rows: Vec<InferenceMarketRow> = sqlx::query_as(&sql)
-            .bind(cursor_key)
-            .bind(cursor_id)
-            .bind(limit + 1)
-            .fetch_all(self.pool())
-            .await
-            .context("select inference markets listing")?;
+        let mut query = sqlx::query_as(&sql).bind(cursor_key).bind(cursor_id).bind(limit + 1);
+        // `$4` exists only inside the liquidity fragment. Postgres rejects a
+        // bind the statement does not reference, so this is conditional on the
+        // very thing that emits it.
+        if listing.liquidity.is_some() {
+            query = query.bind(listing.now);
+        }
+        let mut rows: Vec<InferenceMarketRow> =
+            query.fetch_all(self.pool()).await.context("select inference markets listing")?;
 
         let has_more = rows.len() as i64 > limit;
         if has_more {
@@ -189,15 +191,17 @@ impl InferenceReadRepository for PostgresReadModelRepository {
         &self,
         orderbook_address: &str,
         limit: u16,
+        now: i64,
     ) -> Result<InferenceDepthSnapshot, anyhow::Error> {
-        get_inference_depth_impl(self, orderbook_address, limit).await
+        get_inference_depth_impl(self, orderbook_address, limit, now).await
     }
 
     async fn get_inference_liquidity(
         &self,
         orderbook_address: &str,
+        now: i64,
     ) -> Result<InferenceLiquidity, anyhow::Error> {
-        get_inference_liquidity_impl(self, orderbook_address).await
+        get_inference_liquidity_impl(self, orderbook_address, now).await
     }
 
     async fn list_inference_orders(
@@ -322,20 +326,33 @@ fn assemble_inference_market(row: InferenceMarketRow) -> Result<InferenceMarket,
 /// `orderbook_address` plus a side is the whole key, which is exactly the
 /// leading edge of `inference_orders_liquidity_idx` (migration 0006).
 ///
-/// `status = 'OPEN' AND amount_remaining > 0` is byte-for-byte what
-/// `get_inference_depth_impl` aggregates, so the filter and the book a client
-/// then fetches cannot disagree. Subscriptions (`is_subscription`) are not
-/// excluded for the same reason: depth counts them, so this counts them.
+/// The resting predicate is byte-for-byte what `get_inference_depth_impl`
+/// aggregates — `status = 'OPEN' AND amount_remaining > 0` and a deadline that
+/// has not passed — so the filter and the book a client then fetches cannot
+/// disagree. Subscriptions (`is_subscription`) are not excluded for the same
+/// reason: depth counts them, so this counts them.
+///
+/// The deadline conjunct mirrors the book's own `_isExpired` (`deadline != 0 &&
+/// block.timestamp >= deadline`): the matcher skips a maker past its deadline,
+/// so quoting one would advertise liquidity no taker can hit. A NULL deadline
+/// is the chain's `0` — good-till-cancel — and never expires. This is a
+/// question about matchability, not about status: the row keeps the `OPEN`
+/// status the chain gave it until `InferenceOrderExpired` arrives, exactly as
+/// migration 0002 requires.
+///
+/// `$4` is the request clock. Only this fragment references it, so the caller
+/// binds it only when a filter is present — see `fetch_listing_inference`.
 ///
 /// The side comes from an allow-listed enum and is rendered as a literal, so
-/// the fragment consumes no bind parameter and cannot disturb `$N` numbering.
+/// the fragment adds no bind of its own and cannot disturb `$N` numbering.
 fn inference_liquidity_predicate(filter: Option<LiquidityFilter>) -> String {
     let side_exists = |is_buy_sql: &str| {
         format!(
             " and exists (select 1 from inference_orders io \
                            where io.orderbook_address = inference_markets.orderbook_address \
                              and io.status = 'OPEN' \
-                             and io.amount_remaining > 0{is_buy_sql})"
+                             and io.amount_remaining > 0 \
+                             and (io.deadline is null or io.deadline > $4){is_buy_sql})"
         )
     };
     match filter {
@@ -361,6 +378,7 @@ fn inference_liquidity_predicate(filter: Option<LiquidityFilter>) -> String {
 async fn get_inference_liquidity_impl(
     repo: &PostgresReadModelRepository,
     orderbook_address: &str,
+    now: i64,
 ) -> Result<InferenceLiquidity, anyhow::Error> {
     let row: Option<InferenceLiquidityRow> = sqlx::query_as(
         r#"select im.quantity_precision                             as quantity_precision,
@@ -376,11 +394,13 @@ async fn get_inference_liquidity_impl(
                     on io.orderbook_address = im.orderbook_address
                    and io.status = 'OPEN'
                    and io.amount_remaining > 0
+                   and (io.deadline is null or io.deadline > $2)
             where im.orderbook_address = $1
               and im.last_reconciled_at is not null
             group by im.quantity_precision, im.version"#,
     )
     .bind(orderbook_address)
+    .bind(now)
     .fetch_optional(repo.pool())
     .await
     .context("aggregate inference_orders for liquidity")?;
@@ -408,6 +428,7 @@ async fn get_inference_depth_impl(
     repo: &PostgresReadModelRepository,
     orderbook_address: &str,
     limit: u16,
+    now: i64,
 ) -> Result<InferenceDepthSnapshot, anyhow::Error> {
     // Resolve + visibility gate. A missing row is a client miss (-1121); a
     // reconciled row with NULL precision is corruption (-1500 via inference_scale).
@@ -431,17 +452,20 @@ async fn get_inference_depth_impl(
         r#"(select true  as is_buy, price::text as price,
                    sum(amount_remaining)::text as quantity
               from inference_orders
-             where orderbook_address = $1 and status = 'OPEN' and amount_remaining > 0 and is_buy
+             where orderbook_address = $1 and status = 'OPEN' and amount_remaining > 0
+               and (deadline is null or deadline > $3) and is_buy
              group by price order by price desc limit $2)
            union all
            (select false as is_buy, price::text as price,
                    sum(amount_remaining)::text as quantity
               from inference_orders
-             where orderbook_address = $1 and status = 'OPEN' and amount_remaining > 0 and not is_buy
+             where orderbook_address = $1 and status = 'OPEN' and amount_remaining > 0
+               and (deadline is null or deadline > $3) and not is_buy
              group by price order by price asc limit $2)"#,
     )
     .bind(orderbook_address)
     .bind(limit)
+    .bind(now)
     .fetch_all(repo.pool())
     .await
     .context("aggregate inference_orders for depth")?;
@@ -741,8 +765,24 @@ fn build_snapshot_query<'a>(
                 b.push_bind(is_buy);
                 b.push(" and status = ");
                 b.push_bind(status.db_status());
-                // No residual on any branch: `db_status()` pins one stored value, and LIVE
-                // is exactly OPEN. An index scan alone decides membership.
+                // `db_status()` pins one stored value, so the index scan alone decides
+                // membership on every branch but this one. LIVE additionally drops rows
+                // whose deadline has passed: the book skips such a maker when matching
+                // (`_isExpired`), so it is no longer resting in any useful sense, even
+                // though the chain has not yet emitted `InferenceOrderExpired` and the
+                // row's reported `status` is therefore still LIVE. That stays true —
+                // status remains chain-authoritative per migration 0002; this is a
+                // matchability filter, and `?includeExpired=true` turns it off.
+                //
+                // The residual is free: every page column is read from the heap anyway,
+                // so the extra conjunct costs no additional fetch. No other branch is
+                // touched — expiry-by-deadline is meaningless for a row that is already
+                // FILLED, CANCELLED or EXPIRED.
+                if !q.include_expired && matches!(status, InferenceOrderStatus::Live) {
+                    b.push(" and (deadline is null or deadline > ");
+                    b.push_bind(q.now);
+                    b.push(")");
+                }
                 if let Some(tc) = &q.token_contract {
                     b.push(" and token_contract = ");
                     b.push_bind(tc);
@@ -974,11 +1014,25 @@ mod tests {
             // counts as resting.
             assert!(sql.contains("io.status = 'OPEN'"), "sql={sql}");
             assert!(sql.contains("io.amount_remaining > 0"), "sql={sql}");
+            // A maker past its deadline is skipped by the book's matcher, so it
+            // is not liquidity. NULL is the chain's `0` — good-till-cancel —
+            // and must survive.
+            assert!(
+                sql.contains("(io.deadline is null or io.deadline > $4)"),
+                "the resting definition must exclude lapsed makers; sql={sql}",
+            );
             // The fragment is appended to an existing WHERE clause.
             assert!(sql.starts_with(" and exists ("), "sql={sql}");
-            // No bind placeholder: the side is a literal, so the listing's
-            // $1..$3 numbering is untouched.
-            assert!(!sql.contains('$'), "filter must not bind params; sql={sql}");
+            // `$4` — the request clock — is the ONLY placeholder the fragment
+            // introduces, and it sits past the listing's fixed $1..$3, so
+            // adding or dropping the filter never renumbers them. The side is
+            // a literal and binds nothing.
+            let placeholders: Vec<&str> =
+                sql.match_indices('$').map(|(i, _)| &sql[i..i + 2]).collect();
+            assert!(
+                placeholders.iter().all(|p| *p == "$4"),
+                "the filter may reference only $4; sql={sql}",
+            );
         }
     }
 

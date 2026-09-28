@@ -13,14 +13,20 @@
 -- one per open order on the book.
 --
 -- This index drops `price` (irrelevant to both callers), pushes
--- `amount_remaining > 0` into the predicate, and carries `amount_remaining` as
--- an INCLUDE payload, so the EXISTS probe and the per-side sums are both
--- index-only.
+-- `amount_remaining > 0` into the predicate, and carries `amount_remaining`
+-- and `deadline` as INCLUDE payload, so the EXISTS probe and the per-side sums
+-- are both index-only.
 --
--- Both callers filter on exactly `status = 'OPEN' AND amount_remaining > 0` —
--- the same pair `/api/v1/inference/depth` aggregates on — so the partial
--- predicate is implied by every query that uses this index.
+-- `deadline` is payload rather than predicate because the test is against the
+-- request clock (`deadline IS NULL OR deadline > $now`), which no index
+-- predicate may reference. Carrying the column keeps that comparison on the
+-- index tuple instead of sending every candidate row to the heap.
+--
+-- Both callers filter on exactly `status = 'OPEN' AND amount_remaining > 0`
+-- plus that deadline test — the same definition of resting
+-- `/api/v1/inference/depth` aggregates on — so the partial predicate is
+-- implied by every query that uses this index.
 create index inference_orders_liquidity_idx
     on inference_orders (orderbook_address, is_buy)
-    include (amount_remaining)
+    include (amount_remaining, deadline)
     where status = 'OPEN' and amount_remaining > 0;

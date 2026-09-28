@@ -31,6 +31,7 @@
     - [Inference Depth](#inference-depth)
     - [Inference Liquidity](#inference-liquidity)
     - [Inference Orders](#inference-orders)
+      - [Lapsed orders](#lapsed-orders)
     - [Inference Trades](#inference-trades)
   - [Account Endpoints](#account-endpoints)
     - [Account Balance](#account-balance)
@@ -906,7 +907,7 @@ Errors:
 
 #### Liquidity filter
 
-`?liquidity=` keeps only books that currently have orders resting on them. An order counts when it is open and still has ticks left — exactly the orders [`/api/v1/inference/depth`](#inference-depth) would show. Filled and cancelled orders never count, and neither does an order whose ticks are all delivered.
+`?liquidity=` keeps only books that currently have orders resting on them. An order counts when it is open, still has ticks left, and has not lapsed — exactly the orders [`/api/v1/inference/depth`](#inference-depth) would show. Filled and cancelled orders never count, neither does an order whose ticks are all delivered, and neither does one whose `deadline` has passed (see [Lapsed orders](#lapsed-orders)); an order with no deadline is good-till-cancel and always counts.
 
 | Value | A book is returned when |
 | --- | --- |
@@ -955,6 +956,8 @@ Response:
 ```
 
 Each bid or ask item is `[pricePerTick, ticks]` — price in `SHELL` and the total ticks resting at that price.
+
+Orders whose `deadline` has passed are **not** included: the book skips such a maker when matching, so quoting it would advertise ticks no taker can hit. See [Lapsed orders](#lapsed-orders). There is no opt-out — an unhittable order is not depth.
 
 | Field | Type | Description |
 | --- | --- | --- |
@@ -1012,7 +1015,7 @@ Response:
 | `bidOrders` | INT | Number of open orders behind `bidTicks`. |
 | `askOrders` | INT | Number of open orders behind `askTicks`. |
 
-Subscriptions are ordinary orders here: depth counts them, so these totals count them.
+Subscriptions are ordinary orders here: depth counts them, so these totals count them. Orders whose `deadline` has passed are excluded, for the same reason depth excludes them — see [Lapsed orders](#lapsed-orders).
 
 Errors:
 
@@ -1042,9 +1045,23 @@ Query parameters:
 | `tokenContract` | STRING | NO | Exact deal `TokenContract` address. Mutually exclusive with `note`. Refused with `-1500` (HTTP 503, retry) while the book holds a live SELL whose `TokenContract` the indexer does not know. |
 | `note` | STRING | NO | Exact owning PrivateNote address. Mutually exclusive with `tokenContract`. |
 | `side` | STRING | NO | `BUY` or `SELL`. |
-| `status` | STRING | NO | Comma-separated: `LIVE`, `FILLED`, `CANCELLED`, `EXPIRED`. Tokens are trimmed and de-duplicated. Default: all statuses. `LIVE` means currently resting; `EXPIRED` means the book dropped it once its deadline passed. |
+| `status` | STRING | NO | Comma-separated: `LIVE`, `FILLED`, `CANCELLED`, `EXPIRED`. Tokens are trimmed and de-duplicated. Default: all statuses. `LIVE` means currently resting — by default excluding rows whose `deadline` has lapsed, see [`includeExpired`](#lapsed-orders); `EXPIRED` means the chain confirmed the book dropped it. |
 | `limit` | INT | NO | Page size. Default: `100`. Range: `[1, 500]`; out-of-range values are rejected, not clamped. |
 | `cursor` | STRING | NO | Keyset cursor: the decimal `orderId` of the last row on the previous page, taken verbatim from a previous call's `nextCursor`. |
+| `includeExpired` | BOOLEAN | NO | Include `LIVE` rows whose `deadline` has already passed. Default `false`. Exactly `true` or `false`; any other value is `-1130`. See [Lapsed orders](#lapsed-orders). |
+
+#### Lapsed orders
+
+A resting order carries an optional `deadline`. Once it passes, the book stops matching that order — it is skipped and dropped the next time the book is touched — but the row keeps its `LIVE` status until the chain emits the expiry, at which point it becomes `EXPIRED`. Between those two moments the order is quoted but unhittable.
+
+By default this endpoint hides those rows: with `status=LIVE` (or no `status` at all) an order whose `deadline` is at or before `serverTime` is omitted. `includeExpired=true` returns them.
+
+- `deadline` **null** means good-till-cancel. Such an order never lapses and is always returned.
+- The boundary is inclusive: at `deadline == serverTime` the order has already lapsed, matching the book's own rule.
+- Only `LIVE` is affected. `FILLED`, `CANCELLED` and `EXPIRED` rows are returned regardless of their `deadline` — the notion does not apply once a row is terminal.
+- A row returned under `includeExpired=true` still reports `"status": "LIVE"`. The status is what the chain says; this parameter only decides whether the row is shown. Compare `deadline` against `serverTime` to tell the two apart.
+
+The same rule governs what counts as resting in [`/api/v1/inference/depth`](#inference-depth), [`/api/v1/inference/liquidity`](#inference-liquidity) and the [`?liquidity=` filter](#liquidity-filter) — with no opt-out there, because a lapsed order is not depth.
 
 Response:
 
@@ -1107,6 +1124,7 @@ Errors:
 | `limit` present but not an integer | `-1130` | 400 |
 | `limit` outside `[1, 500]` | `-1102` | 400 |
 | `cursor` present but not all decimal digits, or oversized | `-1130` | 400 |
+| `includeExpired` present and not exactly `true` / `false` | `-1130` | 400 |
 | `inferenceOrderBookAddress` not found | `-1121` | 404 |
 | A `tokenContract` query scopes live SELLs while the book holds one whose TokenContract the indexer does not know | `-1500` | 503 |
 

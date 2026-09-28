@@ -121,12 +121,26 @@ async fn seed_order(
     status: &str,
     token_contract: Option<&str>,
 ) {
+    seed_order_until(pool, ob, order_id, is_buy, status, token_contract, None).await;
+}
+
+/// `seed_order` with an explicit `deadline` (unix seconds); `None` is the
+/// chain's `0` — good-till-cancel, which never expires.
+async fn seed_order_until(
+    pool: &PgPool,
+    ob: &str,
+    order_id: i64,
+    is_buy: bool,
+    status: &str,
+    token_contract: Option<&str>,
+    deadline: Option<i64>,
+) {
     sqlx::query(
         r#"insert into inference_orders
                (orderbook_address, order_id, is_buy, price, amount_initial, amount_remaining,
                 is_subscription, status, last_chain_order, token_contract,
-                chain_created_at, chain_updated_at)
-           values ($1, $2, $3, 10, 5, 5, false, $4, $5, $6, now(), now())"#,
+                deadline, chain_created_at, chain_updated_at)
+           values ($1, $2, $3, 10, 5, 5, false, $4, $5, $6, $7::numeric, now(), now())"#,
     )
     .bind(ob)
     .bind(order_id)
@@ -134,6 +148,7 @@ async fn seed_order(
     .bind(status)
     .bind(format!("co-{ob}-{order_id}"))
     .bind(token_contract)
+    .bind(deadline)
     .execute(pool)
     .await
     .expect("seed inference_orders");
@@ -150,8 +165,16 @@ fn query(ob: &str) -> InferenceOrdersQuery {
         statuses: InferenceOrderStatusSet::all(),
         limit: OrdersLimit::DEFAULT,
         cursor: None,
+        now: NOW,
+        // This suite seeds no deadlines, so the default (hide past-deadline
+        // LIVE rows) changes nothing here. Expiry is covered in
+        // `inference_liquidity.rs`.
+        include_expired: false,
     }
 }
+
+/// Request clock. Immaterial while every fixture is good-till-cancel.
+const NOW: i64 = 1_700_000_000;
 
 trait QueryBuilderExt {
     fn token_contract(self, tc: &str) -> Self;
@@ -160,6 +183,7 @@ trait QueryBuilderExt {
     fn status(self, statuses: &[InferenceOrderStatus]) -> Self;
     fn limit(self, limit: u16) -> Self;
     fn cursor(self, cursor: &str) -> Self;
+    fn include_expired(self) -> Self;
 }
 
 impl QueryBuilderExt for InferenceOrdersQuery {
@@ -186,6 +210,11 @@ impl QueryBuilderExt for InferenceOrdersQuery {
 
     fn limit(mut self, limit: u16) -> Self {
         self.limit = OrdersLimit::new(limit).expect("valid limit in test");
+        self
+    }
+
+    fn include_expired(mut self) -> Self {
+        self.include_expired = true;
         self
     }
 
@@ -725,4 +754,88 @@ async fn a_negative_amount_remaining_trips_the_scale_guard() {
     let repo = PostgresReadModelRepository::new(pool.clone());
     let err = repo.list_inference_orders(&query(ob)).await.unwrap_err();
     assert!(matches!(err.downcast_ref::<DomainError>(), Some(DomainError::MarketInconsistent)));
+}
+
+// ---------------------------------------------------------------------------
+// Expiry. A LIVE row whose deadline has passed is still stored OPEN — the chain
+// has not yet emitted `InferenceOrderExpired` — but the book already skips it
+// when matching, so the default view hides it and `includeExpired` restores it.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn live_hides_a_past_deadline_order_until_include_expired() {
+    let Some(pool) = test_pool().await else { return };
+    let _guard = CAPTURE_CURSOR_LOCK.lock().await;
+    seed_at_head(&pool).await;
+    let ob = "0:inf_orders_expiry";
+    purge(&pool, ob).await;
+    seed_reconciled_market(&pool, ob).await;
+    // 1 lapsed, 2 still good, 3 good-till-cancel.
+    seed_order_until(&pool, ob, 1, true, "OPEN", None, Some(NOW - 1)).await;
+    seed_order_until(&pool, ob, 2, true, "OPEN", None, Some(NOW + 1000)).await;
+    seed_order(&pool, ob, 3, true, "OPEN", None).await;
+
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let ids = |page: dodex_application::InferenceOrdersPage| {
+        let mut v: Vec<String> = page.orders.into_iter().map(|o| o.order_id).collect();
+        v.sort();
+        v
+    };
+
+    let default = ids(repo.list_inference_orders(&query(ob).status(&[Live])).await.unwrap());
+    assert_eq!(default, vec!["2".to_string(), "3".to_string()], "the lapsed order is hidden");
+
+    let all = ids(repo
+        .list_inference_orders(&query(ob).status(&[Live]).include_expired())
+        .await
+        .unwrap());
+    assert_eq!(
+        all,
+        vec!["1".to_string(), "2".to_string(), "3".to_string()],
+        "includeExpired=true restores the unfiltered view",
+    );
+
+    purge(&pool, ob).await;
+}
+
+#[tokio::test]
+async fn a_hidden_order_still_reports_the_status_the_chain_gave_it() {
+    let Some(pool) = test_pool().await else { return };
+    let _guard = CAPTURE_CURSOR_LOCK.lock().await;
+    seed_at_head(&pool).await;
+    let ob = "0:inf_orders_expiry_status";
+    purge(&pool, ob).await;
+    seed_reconciled_market(&pool, ob).await;
+    seed_order_until(&pool, ob, 1, true, "OPEN", None, Some(NOW - 1)).await;
+
+    // The filter is about matchability, not status. Migration 0002 pins status
+    // to the chain — a row stays LIVE until `InferenceOrderExpired` arrives —
+    // so the row surfaced by `includeExpired` must NOT claim to be EXPIRED.
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let page =
+        repo.list_inference_orders(&query(ob).status(&[Live]).include_expired()).await.unwrap();
+    assert_eq!(page.orders.len(), 1);
+    assert_eq!(page.orders[0].status, Live, "status stays chain-authoritative");
+    assert_eq!(page.orders[0].deadline.as_deref(), Some((NOW - 1).to_string().as_str()));
+
+    purge(&pool, ob).await;
+}
+
+#[tokio::test]
+async fn expiry_does_not_touch_terminal_rows() {
+    let Some(pool) = test_pool().await else { return };
+    let _guard = CAPTURE_CURSOR_LOCK.lock().await;
+    seed_at_head(&pool).await;
+    let ob = "0:inf_orders_expiry_terminal";
+    purge(&pool, ob).await;
+    seed_reconciled_market(&pool, ob).await;
+    // A FILLED row with a long-past deadline: expiry-by-deadline is meaningless
+    // once a row is terminal, so the default view must still return it.
+    seed_order_until(&pool, ob, 1, true, "FILLED", None, Some(NOW - 10_000)).await;
+
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let page = repo.list_inference_orders(&query(ob).status(&[Filled])).await.unwrap();
+    assert_eq!(page.orders.len(), 1, "a terminal row is never hidden by the deadline filter");
+
+    purge(&pool, ob).await;
 }

@@ -122,7 +122,7 @@ pub(crate) async fn get_inference_markets(
     })?;
 
     let now = now_seconds();
-    let request = build_inference_markets_request(req)?;
+    let request = build_inference_markets_request(req, now)?;
 
     let use_case = GetInferenceMarketsUseCase::new(inference_repo);
     let page = use_case
@@ -138,7 +138,10 @@ pub(crate) async fn get_inference_markets(
     }))
 }
 
-fn build_inference_markets_request(req: &mut Request) -> Result<InferenceMarketsRequest, ApiError> {
+fn build_inference_markets_request(
+    req: &mut Request,
+    now: i64,
+) -> Result<InferenceMarketsRequest, ApiError> {
     let address = non_empty_query(req, "inferenceOrderBookAddress");
 
     if let Some(addr) = address {
@@ -185,7 +188,13 @@ fn build_inference_markets_request(req: &mut Request) -> Result<InferenceMarkets
         .map(|v| v.clamp(1, INFERENCE_MAX_LIMIT as i64) as u16)
         .unwrap_or(INFERENCE_DEFAULT_LIMIT);
 
-    Ok(InferenceMarketsRequest::Listing(InferenceMarketsListing { liquidity, sort, cursor, limit }))
+    Ok(InferenceMarketsRequest::Listing(InferenceMarketsListing {
+        liquidity,
+        sort,
+        cursor,
+        limit,
+        now,
+    }))
 }
 
 fn inference_market_to_dto(m: InferenceMarket) -> InferenceMarketDto {
@@ -283,7 +292,7 @@ pub(crate) async fn get_inference_depth(
 
     let use_case = GetInferenceDepthUseCase::new(inference_repo);
     let snapshot = use_case
-        .execute(GetInferenceDepthQuery { orderbook_address: address, limit })
+        .execute(GetInferenceDepthQuery { orderbook_address: address, limit, now: now_seconds() })
         .await
         .map_err(|err| map_domain_or_unexpected(err, "get_inference_depth"))?;
 
@@ -349,14 +358,17 @@ pub(crate) async fn get_inference_liquidity(
     let address = non_empty_query(req, "inferenceOrderBookAddress")
         .ok_or(ApiError::from(DomainError::MissingParameter))?;
 
+    // One clock for both: the totals must not be cut at a different instant
+    // from the one the response reports.
+    let now = now_seconds();
     let use_case = GetInferenceLiquidityUseCase::new(inference_repo);
     let liquidity = use_case
-        .execute(GetInferenceLiquidityQuery { orderbook_address: address })
+        .execute(GetInferenceLiquidityQuery { orderbook_address: address, now })
         .await
         .map_err(|err| map_domain_or_unexpected(err, "get_inference_liquidity"))?;
 
     Ok(Json(InferenceLiquidityResponse {
-        server_time: now_seconds(),
+        server_time: now,
         orderbook_address: liquidity.orderbook_address,
         contract_version: liquidity.contract_version,
         bid_ticks: liquidity.bid_ticks,
@@ -420,6 +432,7 @@ struct InferenceOrderDto {
         ("status" = Option<Vec<dto::InferenceOrderStatus>>, Query, style = Form, explode = false, description = "Comma-separated: LIVE, FILLED, CANCELLED, EXPIRED. Default: all. LIVE means currently resting; EXPIRED means the book dropped it once its deadline passed."),
         ("limit" = Option<i64>, Query, minimum = 1, maximum = 500, description = "Page size. Default 100, max 500; out-of-range values are rejected."),
         ("cursor" = Option<String>, Query, description = "Keyset cursor from a previous call's nextCursor."),
+        ("includeExpired" = Option<bool>, Query, description = "Include LIVE rows whose deadline has already passed. Default false — such an order is no longer matchable."),
     ),
     security(()),
 )]
@@ -451,6 +464,11 @@ pub(crate) async fn get_inference_orders(
         // MissingParameter inside the use case, matching prediction/orders.
         limit: optional_typed_query::<i64>(req, "limit")?,
         cursor: req.query::<String>("cursor"),
+        now: now_seconds(),
+        // `bool::from_str` takes exactly `true` / `false`; anything else is
+        // InvalidParameter rather than a silent default, so a typo cannot turn
+        // into "expired rows hidden" without the caller noticing.
+        include_expired: optional_typed_query::<bool>(req, "includeExpired")?,
     };
 
     let use_case = GetInferenceOrdersUseCase::new(inference_repo);

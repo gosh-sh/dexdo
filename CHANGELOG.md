@@ -2,13 +2,18 @@
 
 All notable changes to DEX.DO are recorded here. Entries are date-based, newest first.
 
-## [2026-09-18]
+## [2026-09-28]
 
 ### Added
 
 - **`GET /api/v1/inference/markets?liquidity=BUY|SELL|ANY|BOTH` — list only the models someone is actually quoting.** An order counts when it is open and still has ticks left, the same orders `/api/v1/inference/depth` shows; filled and cancelled ones never do, and subscriptions count exactly as depth counts them. `BUY` wants a resting bid, `SELL` a resting ask, `ANY` either, `BOTH` one of each. The response shape is unchanged: the filter answers "is this side quoted", not "how much". Any other value is `-1130 / 400`, and like the other listing parameters it cannot be combined with `inferenceOrderBookAddress` — presence alone conflicts, so even an empty `&liquidity=` is `-1102 / 400`.
 - **`GET /api/v1/inference/liquidity` — how many ticks are resting on one model's book.** Public, no auth. Takes `inferenceOrderBookAddress` and returns `bidTicks` / `askTicks` (summed over the open orders of that side, scaled like a depth level's tick count) plus `bidOrders` / `askOrders` and the book's `contractVersion`. A book with nothing resting comes back `200` with `"0"` totals rather than a 404; an unknown book, or one not yet visible through the API, is `-1121 / 404`. There is no all-books mode on purpose — screen with the `?liquidity=` filter above, then read totals per book.
-- **Migration `0006_inference_orders_liquidity_idx` — run it.** Adds `inference_orders_liquidity_idx`, a partial index on `(orderbook_address, is_buy) INCLUDE (amount_remaining)` where `status = 'OPEN' AND amount_remaining > 0`, which both of the above read index-only. Without it they fall back to heap fetches over the existing `inference_orders_open_book_idx` — one per book for the filter, one per open order for the totals. Index creation is not `CONCURRENTLY`, so it takes a brief write lock on `inference_orders`.
+- **`?includeExpired=` on `GET /api/v1/inference/orders`.** An order carries an optional `deadline`; once it passes, the book stops matching that order, but the row keeps its `LIVE` status until the chain emits the expiry. Between those two moments it was quoted but unhittable. `status=LIVE` (and the default, no-`status` view) now omits such rows; `includeExpired=true` returns them. Exactly `true` or `false` — any other value is `-1130`, so a typo cannot silently hide rows. A row returned under `includeExpired=true` still reports `"status": "LIVE"`: the status is what the chain says, and the parameter only decides whether the row is shown. `deadline: null` is good-till-cancel and is never hidden; the boundary is inclusive (`deadline == serverTime` has already lapsed), matching the book's own rule. `FILLED` / `CANCELLED` / `EXPIRED` rows are unaffected.
+- **Migration `0006_inference_orders_liquidity_idx` — run it.** Adds `inference_orders_liquidity_idx`, a partial index on `(orderbook_address, is_buy) INCLUDE (amount_remaining, deadline)` where `status = 'OPEN' AND amount_remaining > 0`, which both of the above read index-only. Without it they fall back to heap fetches over the existing `inference_orders_open_book_idx` — one per book for the filter, one per open order for the totals. Index creation is not `CONCURRENTLY`, so it takes a brief write lock on `inference_orders`.
+
+### Changed
+
+- **`GET /api/v1/inference/depth` no longer quotes orders whose deadline has passed.** The book's matcher skips such a maker, so the ticks it advertised could not be hit: a taker sending against them got nothing. Depth, the new `?liquidity=` filter and `/api/v1/inference/liquidity` now share one definition of resting — open, ticks remaining, deadline not passed — so the three cannot disagree. There is no opt-out on these three; the row-level `/api/v1/inference/orders` has `includeExpired` instead. A book whose quotes all sat past their deadline will now report an empty side where it previously reported depth. Nothing about stored state changed, and `status` is still set only by the chain's `InferenceOrderExpired`.
 
 ## [2026-09-01]
 

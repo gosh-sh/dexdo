@@ -158,6 +158,11 @@ pub struct InferenceMarketsListing {
     pub sort: InferenceMarketsSort,
     pub cursor: Option<String>,
     pub limit: u16,
+    /// Request wall-clock, unix seconds. Only the `liquidity` filter reads it —
+    /// an order past its deadline is no longer matchable, so it is not
+    /// liquidity. Threaded from the handler rather than taken from SQL `now()`
+    /// so one response cannot mix clocks, matching the prediction read path.
+    pub now: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -360,6 +365,18 @@ pub struct InferenceOrdersQuery {
     pub statuses: InferenceOrderStatusSet,
     pub limit: OrdersLimit,
     pub cursor: Option<InferenceOrdersCursor>,
+    /// Request wall-clock, unix seconds. Read only when `include_expired` is
+    /// false, to cut LIVE rows whose deadline has passed.
+    pub now: i64,
+    /// Serve LIVE rows whose deadline has already passed. `false` (the default)
+    /// hides them: the book skips such an order when matching, so it is no
+    /// longer resting in any useful sense, even though the chain has not yet
+    /// emitted `InferenceOrderExpired` for it and the row's own `status` is
+    /// therefore still `LIVE`. `true` restores the unfiltered view.
+    ///
+    /// Only the LIVE branch is affected — expiry-by-deadline is meaningless for
+    /// a row that is already FILLED, CANCELLED or EXPIRED.
+    pub include_expired: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -756,20 +773,26 @@ pub trait InferenceReadRepository: Send + Sync {
 
     /// Resting bids/asks for one book. Unknown / unreconciled address →
     /// `InvalidMarketOrSymbol`; corrupt read-model data → `MarketInconsistent`.
+    ///
+    /// `now` (unix seconds) drops makers whose deadline has passed: the book
+    /// skips them when matching, so quoting them would overstate the depth a
+    /// taker can actually hit.
     async fn get_inference_depth(
         &self,
         orderbook_address: &str,
         limit: u16,
+        now: i64,
     ) -> Result<InferenceDepthSnapshot, anyhow::Error>;
 
     /// Resting-liquidity totals for one book: ticks and order counts per side.
-    /// Resolution and error mapping mirror
+    /// Resolution, error mapping and the `now` expiry cut-off mirror
     /// [`get_inference_depth`](Self::get_inference_depth) — unknown /
     /// unreconciled address → `InvalidMarketOrSymbol`, corrupt read-model data
     /// → `MarketInconsistent`. An empty book is zero totals, not an error.
     async fn get_inference_liquidity(
         &self,
         orderbook_address: &str,
+        now: i64,
     ) -> Result<InferenceLiquidity, anyhow::Error>;
 
     /// List a book's orders. Unknown / unreconciled address → `InvalidMarketOrSymbol`.
@@ -804,15 +827,17 @@ impl<T: ?Sized + InferenceReadRepository> InferenceReadRepository for Arc<T> {
         &self,
         orderbook_address: &str,
         limit: u16,
+        now: i64,
     ) -> Result<InferenceDepthSnapshot, anyhow::Error> {
-        (**self).get_inference_depth(orderbook_address, limit).await
+        (**self).get_inference_depth(orderbook_address, limit, now).await
     }
 
     async fn get_inference_liquidity(
         &self,
         orderbook_address: &str,
+        now: i64,
     ) -> Result<InferenceLiquidity, anyhow::Error> {
-        (**self).get_inference_liquidity(orderbook_address).await
+        (**self).get_inference_liquidity(orderbook_address, now).await
     }
 
     async fn list_inference_orders(
@@ -1238,6 +1263,8 @@ where
 pub struct GetInferenceDepthQuery {
     pub orderbook_address: String,
     pub limit: u16,
+    /// Request wall-clock, unix seconds. Makers past this are dropped.
+    pub now: i64,
 }
 
 pub struct GetInferenceDepthUseCase<R> {
@@ -1258,13 +1285,15 @@ where
         &self,
         query: GetInferenceDepthQuery,
     ) -> Result<InferenceDepthSnapshot, anyhow::Error> {
-        self.repo.get_inference_depth(&query.orderbook_address, query.limit).await
+        self.repo.get_inference_depth(&query.orderbook_address, query.limit, query.now).await
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct GetInferenceLiquidityQuery {
     pub orderbook_address: String,
+    /// Request wall-clock, unix seconds; shared with the response `serverTime`.
+    pub now: i64,
 }
 
 pub struct GetInferenceLiquidityUseCase<R> {
@@ -1285,7 +1314,7 @@ where
         &self,
         query: GetInferenceLiquidityQuery,
     ) -> Result<InferenceLiquidity, anyhow::Error> {
-        self.repo.get_inference_liquidity(&query.orderbook_address).await
+        self.repo.get_inference_liquidity(&query.orderbook_address, query.now).await
     }
 }
 
@@ -1331,6 +1360,10 @@ pub struct GetInferenceOrdersInput {
     pub status_csv: Option<String>,
     pub limit: Option<i64>,
     pub cursor: Option<String>,
+    /// Request wall-clock, unix seconds.
+    pub now: i64,
+    /// Raw `?includeExpired=`; absent means `false`.
+    pub include_expired: Option<bool>,
 }
 
 pub struct GetInferenceOrdersUseCase<R> {
@@ -1386,6 +1419,8 @@ where
             statuses,
             limit,
             cursor,
+            now: input.now,
+            include_expired: input.include_expired.unwrap_or(false),
         };
         self.repo.list_inference_orders(&query).await
     }
@@ -7314,6 +7349,7 @@ mod inference_usecase_tests {
             &self,
             orderbook_address: &str,
             limit: u16,
+            _now: i64,
         ) -> Result<InferenceDepthSnapshot, anyhow::Error> {
             Ok(InferenceDepthSnapshot {
                 orderbook_address: orderbook_address.to_string(),
@@ -7327,6 +7363,7 @@ mod inference_usecase_tests {
         async fn get_inference_liquidity(
             &self,
             orderbook_address: &str,
+            _now: i64,
         ) -> Result<InferenceLiquidity, anyhow::Error> {
             Ok(InferenceLiquidity {
                 orderbook_address: orderbook_address.to_string(),
@@ -7374,7 +7411,11 @@ mod inference_usecase_tests {
     async fn depth_use_case_passes_args_through() {
         let uc = GetInferenceDepthUseCase::new(Arc::new(StubInferenceRepo::default()));
         let snap = uc
-            .execute(GetInferenceDepthQuery { orderbook_address: "0:ob".into(), limit: 7 })
+            .execute(GetInferenceDepthQuery {
+                orderbook_address: "0:ob".into(),
+                limit: 7,
+                now: 1_700_000_000,
+            })
             .await
             .unwrap();
         assert_eq!(snap.orderbook_address, "0:ob");
@@ -7526,6 +7567,8 @@ mod inference_usecase_tests {
                 status_csv: None,
                 limit: None,
                 cursor: None,
+                now: 1_700_000_000,
+                include_expired: None,
             })
             .await
             .unwrap_err();
@@ -7547,6 +7590,8 @@ mod inference_usecase_tests {
                     status_csv: None,
                     limit: Some(limit),
                     cursor: None,
+                    now: 1_700_000_000,
+                    include_expired: None,
                 })
                 .await
                 .unwrap_err();
@@ -7576,6 +7621,8 @@ mod inference_usecase_tests {
                 status_csv: None,
                 limit: None,
                 cursor: None,
+                now: 1_700_000_000,
+                include_expired: None,
             })
             .await
             .unwrap();
