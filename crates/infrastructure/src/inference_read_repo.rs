@@ -335,12 +335,13 @@ fn assemble_inference_market(row: InferenceMarketRow) -> Result<InferenceMarket,
 /// The deadline conjunct mirrors the book's own `_isExpired` (`deadline != 0 &&
 /// block.timestamp >= deadline`): the matcher skips a maker past its deadline,
 /// so quoting one would advertise liquidity no taker can hit. A NULL deadline
-/// never expires: from contract 4.0.33 on it is a good-till-cancel BUY; older
+/// never expires: from contract 4.0.31 on it is a good-till-cancel BUY; older
 /// books also hold deadline-0 SELLs and legacy subscription rows (see the
 /// `inference_orders.deadline` column in data-schema.md).
-/// This is a question about matchability, not about status: the row keeps the `OPEN`
-/// status the chain gave it until `InferenceOrderExpired` arrives, exactly as
-/// migration 0002 requires.
+/// This is a question about matchability, not about status: the row keeps the
+/// `OPEN` status the chain gave it until the chain reports its removal
+/// (`InferenceOrderExpired`, or `InferenceOrderCancelled` on an owner's cancel),
+/// exactly as migration 0002 requires.
 ///
 /// `$4` is the request clock. Only this fragment references it, so the caller
 /// binds it only when a filter is present — see `fetch_listing_inference`.

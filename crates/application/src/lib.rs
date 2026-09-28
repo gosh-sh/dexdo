@@ -209,7 +209,8 @@ impl InferenceOrdersCursor {
 /// `Expired` is a terminal state distinct from `Cancelled`: the book dropped the order
 /// once its deadline passed, rather than anyone asking for it back. It is set only by
 /// `InferenceOrderExpired` — a row whose `deadline` already lies in the past stays `Live`
-/// until that event lands, so the read model never claims an order left the book earlier
+/// until the chain reports its removal (that event, or `InferenceOrderCancelled` if its
+/// owner cancels it first), so the read model never claims an order left the book earlier
 /// than the chain says it did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InferenceOrderStatus {
@@ -375,11 +376,10 @@ pub struct InferenceOrdersQuery {
     /// An independent filter, composed with `statuses` rather than part of it.
     /// `statuses` asks which rows to select; this asks whether a selected row
     /// can still be matched. The book will not settle against a maker past its
-    /// deadline (`_isExpired`), yet the order stays in the book until a
-    /// taker's match reaches it, someone calls `expireOrder`, or its owner
-    /// cancels it — so the two
-    /// questions have different answers for an unbounded window, and the row's
-    /// `status` stays whatever the chain last said either way.
+    /// deadline (`_isExpired`), yet the order stays in the book until a taker's
+    /// match reaches it, someone calls `expireOrder`, or its owner cancels it —
+    /// so the two questions have different answers for an unbounded window,
+    /// and the row's `status` stays whatever the chain last said either way.
     ///
     /// Applies only to `Live` rows, because only an order that is in the book
     /// can be "in the book past its deadline"; a FILLED, CANCELLED or EXPIRED

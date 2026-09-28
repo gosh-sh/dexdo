@@ -910,10 +910,11 @@ async fn a_token_contract_lookup_still_finds_a_lapsed_sell() {
     let ob = "0:inf_orders_expiry_tc";
     purge(&pool, ob).await;
     seed_reconciled_market(&pool, ob).await;
-    // From contract 4.0.33 every SELL carries a deadline, and one past it is
+    // From contract 4.0.31 every SELL carries a deadline, and one past it is
     // still in the book: its TokenContract's offer latch stays set until a
-    // match, `expireOrder` or the seller's cancel removes the order. A TokenContract lookup asks whether the TC is in use,
-    // so hiding this row would report the TC free while the chain holds it.
+    // match, `expireOrder` or the seller's cancel removes the order. A
+    // TokenContract lookup asks whether the TC is in use, so hiding this row
+    // would report the TC free while the chain holds it.
     seed_order_until(&pool, ob, 1, false, "OPEN", Some("0:tc-lapsed"), Some(NOW - 1)).await;
 
     let repo = PostgresReadModelRepository::new(pool.clone());
@@ -926,6 +927,12 @@ async fn a_token_contract_lookup_still_finds_a_lapsed_sell() {
     // The exemption belongs to the lookup, not to the side.
     let page = repo.list_inference_orders(&query(ob).side(Sell).status(&[Live])).await.unwrap();
     assert!(page.orders.is_empty(), "outside a TokenContract lookup a lapsed SELL is hidden");
+    // ...and the deadline cut is the only thing hiding it.
+    let page = repo
+        .list_inference_orders(&query(ob).side(Sell).status(&[Live]).include_expired())
+        .await
+        .unwrap();
+    assert_eq!(page.orders.len(), 1);
 
     purge(&pool, ob).await;
 }

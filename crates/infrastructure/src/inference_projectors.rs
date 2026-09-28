@@ -24,8 +24,8 @@ pub(crate) const ZERO_ADDRESS: &str =
     "0:0000000000000000000000000000000000000000000000000000000000000000";
 
 /// Map the chain's "absent" encodings onto SQL NULL: a BUY placement carries the zero
-/// address for `tokenContract`, and a good-till-cancel BUY (or, before contract 4.0.33,
-/// a resting SELL) carries deadline 0.
+/// address for `tokenContract`, and a good-till-cancel BUY (or, before contract 4.0.31,
+/// any SELL) carries deadline 0.
 pub(crate) fn non_zero_address(raw: Option<&str>) -> Option<&str> {
     raw.filter(|a| *a != ZERO_ADDRESS)
 }
@@ -180,10 +180,11 @@ async fn apply_inference_order_placed(
     // repairs only `token_contract` and `deadline`.
     let note = Some(field_str(&event.value, "note")?);
     // `tokenContract` and `deadline` are mandatory in the ABI too — a BUY carries the
-    // zero address and a good-till-cancel BUY (pre-4.0.33: a SELL) carries deadline 0,
-    // but neither field is ever absent. Decode strictly and normalize only a successfully decoded zero to NULL:
-    // `.ok()` would map ABI/decoder drift onto a NULL insert and still create the row,
-    // and nothing would ever repair it once it fills or is cancelled before a sweep.
+    // zero address and a good-till-cancel BUY (before 4.0.31, any SELL) carries
+    // deadline 0, but neither field is ever absent. Decode strictly and normalize only
+    // a successfully decoded zero to NULL: `.ok()` would map ABI/decoder drift onto a
+    // NULL insert and still create the row, and nothing would ever repair it once it
+    // fills or is cancelled before a sweep.
     let token_contract: Option<&str> =
         non_zero_address(Some(field_str(&event.value, "tokenContract")?));
     let deadline: Option<String> =

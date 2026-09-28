@@ -576,7 +576,7 @@ A resting SELL whose `token_contract` is still NULL (the indexer has not yet lea
 
 Two independent questions. Neither is derived from the other, and the read model must not collapse them.
 
-**Is the order in the book?** That is the `status` axis, and the chain owns it. `LIVE` is exactly stored `OPEN`: the order is physically resting. Migration 0002 is explicit that a row whose `deadline` already sits in the past keeps that `OPEN` status until `InferenceOrderExpired` arrives, and the column comment forbids deriving a status from wall-clock. Nothing here changes that — `status` is read straight from the column, and a lapsed row is `LIVE` because it is, in fact, still in the book.
+**Is the order in the book?** That is the `status` axis, and the chain owns it. `LIVE` is exactly stored `OPEN`: the order is physically resting. Migration 0002 is explicit that a row whose `deadline` already sits in the past keeps that `OPEN` status until `InferenceOrderExpired` arrives (or, if its owner cancels it first, `InferenceOrderCancelled`), and the column comment forbids deriving a status from wall-clock. Nothing here changes that — `status` is read straight from the column, and a lapsed row is `LIVE` because it is, in fact, still in the book.
 
 **Can it still be matched?** A separate question with a separate answer, and the book has already given it: `_isExpired(deadline)` in `InferenceOrderBook.sol` is `deadline != 0 && block.timestamp >= deadline`, and the matching loops skip such a maker and drop it inline rather than settling against it. An order no taker's match reaches stays in the book until its owner cancels it or someone calls the permissionless `expireOrder`; no service in this repository calls it, so that window has no upper bound. So a lapsed order is present and unmatchable at the same time — there is nothing contradictory about that, and no status can express it.
 
@@ -593,25 +593,26 @@ The read model must not paper over that gap. Quoting a lapsed order in depth adv
 
 `/orders` gets the opt-out because it is the row-level view: an operator chasing why a note's order never filled needs to see the row, and the response carries `deadline` and `serverTime` so the lapse is visible. The aggregate views do not, because there is nothing there to inspect — a lapsed order would simply inflate a number.
 
-`deadline IS NULL` never lapses. On a book at contract 4.0.33 or later it is a BUY placed with `deadline == 0`, good-till-cancel; every SELL there carries a deadline. An older book adds two sources: a SELL, which then carried `deadline = 0` and never lapsed, and a row projected from the retired `InferenceSubscriptionPlaced`, whose deadline the chain held but the event never published — it stays NULL until the reconciler's sweep recovers it, and until then there is nothing to compare. The boundary follows the contract exactly: `deadline == now` has already lapsed, matching `>=`. The clock is the handler's request `now`, so it is the same instant the response reports as `serverTime`.
+`deadline IS NULL` never lapses. On a book at contract 4.0.31 or later it is a BUY placed with `deadline == 0`, good-till-cancel; every SELL there carries a deadline. A book at 4.0.30 or earlier adds two sources: a SELL, which then carried `deadline = 0` and never lapsed, and a row projected from the retired `InferenceSubscriptionPlaced`, whose deadline the chain held but the event never published — it stays NULL until the reconciler's sweep recovers it, and until then there is nothing to compare. The boundary follows the contract exactly: `deadline == now` has already lapsed, matching `>=`. The clock is the handler's request `now`, so it is the same instant the response reports as `serverTime`.
 
 The remaining skew is between that wall-clock and `block.timestamp`. It is the same skew `/api/v1/oracles` already lives with for event availability, and it is one-sided in the safe direction on the read path: an order shown as resting a second before the chain would drop it is the pre-existing behaviour, not a regression.
 
 ### Status vocabulary
 
-Three public values, exhaustive over every row (`InferenceOrderStatus::ALL`):
+Four public values, exhaustive over every row (`InferenceOrderStatus::ALL`):
 
 | Public `status` | `inference_orders.status` |
 | --- | --- |
 | `LIVE` | `OPEN` |
 | `FILLED` | `FILLED` |
 | `CANCELLED` | `CANCELLED` |
+| `EXPIRED` | `EXPIRED` |
 
-`LIVE` is exactly `OPEN`: every chain placement path on an `InferenceOrderBook` requires non-zero size, and the fill projector moves a row to `FILLED` as soon as its remainder reaches zero, so an `OPEN` row is always still resting. This three-way split is exhaustive — every row falls under exactly one value — which is what lets the default (no `status` filter) query claim to cover the whole book.
+`LIVE` is exactly `OPEN`: every chain placement path on an `InferenceOrderBook` requires non-zero size, and the fill projector moves a row to `FILLED` as soon as its remainder reaches zero, so an `OPEN` row is always still in the book. This four-way split is exhaustive — every row falls under exactly one value — which is what lets the default (no `status` filter) query claim to cover the whole book.
 
 `LIVE` is presence, nothing more. Whether a present order has passed its deadline is a separate filter that composes with this one — see [§ includeExpired](#includeexpired) — and it never changes the status a row reports.
 
-`status` is a CSV, parsed by `InferenceOrderStatus::from_csv`: blank / whitespace-only → `MissingParameter` → `-1102` / 400 (a present-but-empty value is a client bug — an unbound template variable — not "no filter"); an unrecognized token → `InvalidParameter` → `-1130` / 400. Tokens are de-duplicated on parse; omitting `status` entirely defaults to all three values.
+`status` is a CSV, parsed by `InferenceOrderStatus::from_csv`: blank / whitespace-only → `MissingParameter` → `-1102` / 400 (a present-but-empty value is a client bug — an unbound template variable — not "no filter"); an unrecognized token → `InvalidParameter` → `-1130` / 400. Tokens are de-duplicated on parse; omitting `status` entirely defaults to all four values.
 
 ### includeExpired
 
