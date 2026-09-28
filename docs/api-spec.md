@@ -1045,23 +1045,27 @@ Query parameters:
 | `tokenContract` | STRING | NO | Exact deal `TokenContract` address. Mutually exclusive with `note`. Refused with `-1500` (HTTP 503, retry) while the book holds a live SELL whose `TokenContract` the indexer does not know. |
 | `note` | STRING | NO | Exact owning PrivateNote address. Mutually exclusive with `tokenContract`. |
 | `side` | STRING | NO | `BUY` or `SELL`. |
-| `status` | STRING | NO | Comma-separated: `LIVE`, `FILLED`, `CANCELLED`, `EXPIRED`. Tokens are trimmed and de-duplicated. Default: all statuses. `LIVE` means currently resting — by default excluding rows whose `deadline` has lapsed, see [`includeExpired`](#lapsed-orders); `EXPIRED` means the chain confirmed the book dropped it. |
+| `status` | STRING | NO | Comma-separated: `LIVE`, `FILLED`, `CANCELLED`, `EXPIRED`. Tokens are trimmed and de-duplicated. Default: all statuses. `LIVE` means the order is in the book; `EXPIRED` means the chain confirmed the book dropped it. Whether a `LIVE` row has passed its deadline is a separate question — see [`includeExpired`](#lapsed-orders). |
 | `limit` | INT | NO | Page size. Default: `100`. Range: `[1, 500]`; out-of-range values are rejected, not clamped. |
 | `cursor` | STRING | NO | Keyset cursor: the decimal `orderId` of the last row on the previous page, taken verbatim from a previous call's `nextCursor`. |
 | `includeExpired` | BOOLEAN | NO | Include `LIVE` rows whose `deadline` has already passed. Default `false`. Exactly `true` or `false`; any other value is `-1130`. See [Lapsed orders](#lapsed-orders). |
 
 #### Lapsed orders
 
-A resting order carries an optional `deadline`. Once it passes, the book stops matching that order — it is skipped and dropped the next time the book is touched — but the row keeps its `LIVE` status until the chain emits the expiry, at which point it becomes `EXPIRED`. Between those two moments the order is quoted but unhittable.
+`status` and `includeExpired` are two independent filters and answer two different questions.
 
-By default this endpoint hides those rows: with `status=LIVE` (or no `status` at all) an order whose `deadline` is at or before `serverTime` is omitted. `includeExpired=true` returns them.
+**`status`** — is the order in the book? `LIVE` means it is: physically resting, exactly the rows the book holds. `FILLED`, `CANCELLED` and `EXPIRED` mean it left, and how.
+
+**`includeExpired`** — can a row still be matched? An order carries an optional `deadline`. Once it passes, the book stops matching that order; it is skipped and dropped the next time the book is touched. But the row is still in the book, and still `LIVE`, until the chain emits the expiry — only then does it become `EXPIRED`. For that window the order is present but unhittable, and `includeExpired` is what decides whether you see it.
+
+By default it is `false`, hiding those rows. `includeExpired=true` returns them.
 
 - `deadline` **null** means good-till-cancel. Such an order never lapses and is always returned.
 - The boundary is inclusive: at `deadline == serverTime` the order has already lapsed, matching the book's own rule.
-- Only `LIVE` is affected. `FILLED`, `CANCELLED` and `EXPIRED` rows are returned regardless of their `deadline` — the notion does not apply once a row is terminal.
-- A row returned under `includeExpired=true` still reports `"status": "LIVE"`. The status is what the chain says; this parameter only decides whether the row is shown. Compare `deadline` against `serverTime` to tell the two apart.
+- The filter composes with `status`, it does not modify it. In practice only `LIVE` rows are affected, because only an order that is in the book can be in the book past its deadline — a terminal row left the book already, so its `deadline` is irrelevant and it is returned either way.
+- A row returned under `includeExpired=true` still reports `"status": "LIVE"`, because it is still in the book. Compare its `deadline` against `serverTime` to see that it has lapsed.
 
-The same rule governs what counts as resting in [`/api/v1/inference/depth`](#inference-depth), [`/api/v1/inference/liquidity`](#inference-liquidity) and the [`?liquidity=` filter](#liquidity-filter) — with no opt-out there, because a lapsed order is not depth.
+[`/api/v1/inference/depth`](#inference-depth), [`/api/v1/inference/liquidity`](#inference-liquidity) and the [`?liquidity=` filter](#liquidity-filter) apply the same deadline rule with no opt-out: those describe what can be traded against, and a lapsed order cannot.
 
 Response:
 

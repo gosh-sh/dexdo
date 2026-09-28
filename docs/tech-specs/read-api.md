@@ -24,7 +24,7 @@ Implementation-facing requirements for the HTTP layer that serves the market-dat
 
 **Resting liquidity** — orders currently on a book AND still matchable: rows with `status = 'OPEN' AND amount_remaining > 0 AND (deadline IS NULL OR deadline > now)`. On the inference side four readers share this one definition — [depth](#apiv1inferencedepth), the [`?liquidity=` listing filter](#resting-liquidity-filter-liquidity), [`/api/v1/inference/liquidity`](#apiv1inferenceliquidity) and the default LIVE view of [`/api/v1/inference/orders`](#apiv1inferenceorders) — so they cannot disagree about what is on the book.
 
-**Lapsed order** — a row still stored `OPEN` whose `deadline` has passed. The book's matcher already skips it (`_isExpired` in `InferenceOrderBook.sol`: `deadline != 0 && block.timestamp >= deadline`), but the chain has not yet emitted `InferenceOrderExpired`, so its stored status is unchanged. Not the same thing as the public `EXPIRED` status, which only the event sets — see [§ Lapsed vs EXPIRED](#lapsed-vs-expired).
+**Lapsed order** — a row that is still in the book (stored `OPEN`) but whose `deadline` has passed. The book's matcher already skips it (`_isExpired` in `InferenceOrderBook.sol`: `deadline != 0 && block.timestamp >= deadline`); the chain has not yet emitted `InferenceOrderExpired`, so the order is still there and its status is still `OPEN`. Orthogonal to the public `EXPIRED` status, which only the event sets — see [§ Lapsed vs EXPIRED](#lapsed-vs-expired).
 
 **Trade tape** — a bare, newest-first list of maker↔taker matches built from an append-only table, never by querying the chain contract during the HTTP request. Two instances share this contract: `/api/v1/prediction/trades` (per market outcome, from the `trades` table) and `/api/v1/inference/trades` (per model order book, from the `inference_trades` table).
 
@@ -574,11 +574,13 @@ A resting SELL whose `token_contract` is still NULL (the indexer has not yet lea
 
 ### Lapsed vs EXPIRED
 
-Two different questions about the same `deadline` column, deliberately kept apart.
+Two independent questions. Neither is derived from the other, and the read model must not collapse them.
 
-**What status does this row have?** The chain decides. Migration 0002 is explicit: a row whose `deadline` already sits in the past keeps its `OPEN` status until `InferenceOrderExpired` arrives, and the column comment forbids deriving a status from wall-clock. Nothing here changes that — `status` is still read straight from the column, and a lapsed row reports `LIVE`.
+**Is the order in the book?** That is the `status` axis, and the chain owns it. `LIVE` is exactly stored `OPEN`: the order is physically resting. Migration 0002 is explicit that a row whose `deadline` already sits in the past keeps that `OPEN` status until `InferenceOrderExpired` arrives, and the column comment forbids deriving a status from wall-clock. Nothing here changes that — `status` is read straight from the column, and a lapsed row is `LIVE` because it is, in fact, still in the book.
 
-**Is this row still matchable?** The book decides, and it has already answered: `_isExpired(deadline)` in `InferenceOrderBook.sol` is `deadline != 0 && block.timestamp >= deadline`, and the matching loops skip such a maker and drop it inline rather than settling against it. So a lapsed order cannot be traded with, whatever its stored status says.
+**Can it still be matched?** A separate question with a separate answer, and the book has already given it: `_isExpired(deadline)` in `InferenceOrderBook.sol` is `deadline != 0 && block.timestamp >= deadline`, and the matching loops skip such a maker and drop it inline rather than settling against it. So a lapsed order is present and unmatchable at the same time — there is nothing contradictory about that, and no status can express it.
+
+Because the two are independent, the filters are too: `?status=` selects on presence, `?includeExpired=` selects on matchability, and they compose. Folding the deadline into the meaning of `LIVE` would have destroyed the distinction the chain maintains.
 
 The read model must not paper over that gap. Quoting a lapsed order in depth advertises ticks no taker can hit — the failure is a client sending an order against liquidity that was never there. So the *resting* predicate excludes lapsed rows everywhere the read model describes the book:
 
@@ -607,7 +609,7 @@ Three public values, exhaustive over every row (`InferenceOrderStatus::ALL`):
 
 `LIVE` is exactly `OPEN`: every chain placement path on an `InferenceOrderBook` requires non-zero size, and the fill projector moves a row to `FILLED` as soon as its remainder reaches zero, so an `OPEN` row is always still resting. This three-way split is exhaustive — every row falls under exactly one value — which is what lets the default (no `status` filter) query claim to cover the whole book.
 
-The mapping is a status mapping, not a visibility rule: by default the `LIVE` branch additionally drops lapsed rows, and `?includeExpired=true` puts them back. Either way the row that is returned reports the status the chain gave it. See [§ Lapsed vs EXPIRED](#lapsed-vs-expired) and [§ includeExpired](#includeexpired).
+`LIVE` is presence, nothing more. Whether a present order has passed its deadline is a separate filter that composes with this one — see [§ includeExpired](#includeexpired) — and it never changes the status a row reports.
 
 `status` is a CSV, parsed by `InferenceOrderStatus::from_csv`: blank / whitespace-only → `MissingParameter` → `-1102` / 400 (a present-but-empty value is a client bug — an unbound template variable — not "no filter"); an unrecognized token → `InvalidParameter` → `-1130` / 400. Tokens are de-duplicated on parse; omitting `status` entirely defaults to all three values.
 
@@ -615,7 +617,9 @@ The mapping is a status mapping, not a visibility rule: by default the `LIVE` br
 
 `?includeExpired=` is parsed with `bool::from_str`, which accepts exactly `true` and `false`; anything else → `InvalidParameter` → `-1130` / 400. A typo must not quietly fall back to the default, because the default hides rows and the caller would have no way to notice.
 
-Absent → `false`. When false, the `LIVE` branch of the union carries `AND (deadline IS NULL OR deadline > $now)`; no other branch is touched, since expiry-by-deadline is meaningless once a row is `FILLED`, `CANCELLED` or `EXPIRED`.
+Absent → `false`. When false, the `LIVE` branch of the union carries `AND (deadline IS NULL OR deadline > $now)`, emitted alongside the `tokenContract` / `note` predicates rather than as part of the status term — it is one more independent filter on the row, not a redefinition of the status.
+
+It reaches only the `LIVE` branch as a consequence rather than a special case: the filter asks about an order that is *in the book* and past its deadline, and a `FILLED`, `CANCELLED` or `EXPIRED` row is not in the book, so nothing there can match the description.
 
 The predicate is a heap residual on that one branch rather than an index term, and costs nothing: every page column is read from the heap anyway, so the conjunct rides along with a fetch the query was already making. It does mean a book carrying many lapsed rows scans further to fill a page — bounded by the keyset `LIMIT`, and self-correcting as the chain emits the expiries.
 

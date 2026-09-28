@@ -765,24 +765,9 @@ fn build_snapshot_query<'a>(
                 b.push_bind(is_buy);
                 b.push(" and status = ");
                 b.push_bind(status.db_status());
-                // `db_status()` pins one stored value, so the index scan alone decides
-                // membership on every branch but this one. LIVE additionally drops rows
-                // whose deadline has passed: the book skips such a maker when matching
-                // (`_isExpired`), so it is no longer resting in any useful sense, even
-                // though the chain has not yet emitted `InferenceOrderExpired` and the
-                // row's reported `status` is therefore still LIVE. That stays true —
-                // status remains chain-authoritative per migration 0002; this is a
-                // matchability filter, and `?includeExpired=true` turns it off.
-                //
-                // The residual is free: every page column is read from the heap anyway,
-                // so the extra conjunct costs no additional fetch. No other branch is
-                // touched — expiry-by-deadline is meaningless for a row that is already
-                // FILLED, CANCELLED or EXPIRED.
-                if !q.include_expired && matches!(status, InferenceOrderStatus::Live) {
-                    b.push(" and (deadline is null or deadline > ");
-                    b.push_bind(q.now);
-                    b.push(")");
-                }
+                // No residual from the status itself: `db_status()` pins one stored
+                // value, and LIVE is exactly OPEN — the order is physically in the
+                // book. An index scan alone decides that membership.
                 if let Some(tc) = &q.token_contract {
                     b.push(" and token_contract = ");
                     b.push_bind(tc);
@@ -790,6 +775,24 @@ fn build_snapshot_query<'a>(
                 if let Some(note) = &q.note {
                     b.push(" and note_address = ");
                     b.push_bind(note);
+                }
+                // Expiry is its own filter, composed with the others above rather than
+                // folded into the status. `status` answers "is the order in the book";
+                // this answers "can it still be matched", and the two are independent
+                // questions about the same row — the book skips a maker past its
+                // deadline (`_isExpired`) long before the chain emits
+                // `InferenceOrderExpired` and the stored status changes.
+                //
+                // It reaches only the LIVE branch as a consequence, not a special case:
+                // a row that is FILLED, CANCELLED or EXPIRED is not in the book at all,
+                // so "still in the book, but past its deadline" cannot describe it.
+                //
+                // The residual is free: every page column is read from the heap anyway,
+                // so the conjunct rides along with a fetch the query already makes.
+                if !q.include_expired && matches!(status, InferenceOrderStatus::Live) {
+                    b.push(" and (deadline is null or deadline > ");
+                    b.push_bind(q.now);
+                    b.push(")");
                 }
                 if let Some(cursor) = &q.cursor {
                     // `order_id` is numeric(78,0); u128 has no Postgres encoding, so pass

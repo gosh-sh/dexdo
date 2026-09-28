@@ -757,9 +757,11 @@ async fn a_negative_amount_remaining_trips_the_scale_guard() {
 }
 
 // ---------------------------------------------------------------------------
-// Expiry. A LIVE row whose deadline has passed is still stored OPEN — the chain
-// has not yet emitted `InferenceOrderExpired` — but the book already skips it
-// when matching, so the default view hides it and `includeExpired` restores it.
+// Expiry — a filter of its own, composed with `status` rather than part of it.
+// `status` selects on presence (LIVE == the order is in the book);
+// `include_expired` selects on matchability. An order past its deadline is
+// both present and unmatchable: still stored OPEN because the chain has not
+// emitted `InferenceOrderExpired`, yet already skipped by the book's matcher.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -808,14 +810,15 @@ async fn a_hidden_order_still_reports_the_status_the_chain_gave_it() {
     seed_reconciled_market(&pool, ob).await;
     seed_order_until(&pool, ob, 1, true, "OPEN", None, Some(NOW - 1)).await;
 
-    // The filter is about matchability, not status. Migration 0002 pins status
-    // to the chain — a row stays LIVE until `InferenceOrderExpired` arrives —
-    // so the row surfaced by `includeExpired` must NOT claim to be EXPIRED.
+    // The two axes stay independent. Migration 0002 pins status to the chain,
+    // and the row IS still in the book, so the row surfaced by
+    // `includeExpired` must keep reporting LIVE — never EXPIRED, which would
+    // claim the book dropped it.
     let repo = PostgresReadModelRepository::new(pool.clone());
     let page =
         repo.list_inference_orders(&query(ob).status(&[Live]).include_expired()).await.unwrap();
     assert_eq!(page.orders.len(), 1);
-    assert_eq!(page.orders[0].status, Live, "status stays chain-authoritative");
+    assert_eq!(page.orders[0].status, Live, "LIVE is presence; the order is still in the book");
     assert_eq!(page.orders[0].deadline.as_deref(), Some((NOW - 1).to_string().as_str()));
 
     purge(&pool, ob).await;

@@ -429,10 +429,10 @@ struct InferenceOrderDto {
         ("tokenContract" = Option<String>, Query, description = "Exact deal TokenContract. Mutually exclusive with `note`. Refused with -1500 (HTTP 503, retry) while the book has a live SELL whose TokenContract the indexer does not know."),
         ("note" = Option<String>, Query, description = "Exact owning PrivateNote address. Mutually exclusive with `tokenContract`."),
         ("side" = Option<String>, Query, description = "BUY or SELL."),
-        ("status" = Option<Vec<dto::InferenceOrderStatus>>, Query, style = Form, explode = false, description = "Comma-separated: LIVE, FILLED, CANCELLED, EXPIRED. Default: all. LIVE means currently resting; EXPIRED means the book dropped it once its deadline passed."),
+        ("status" = Option<Vec<dto::InferenceOrderStatus>>, Query, style = Form, explode = false, description = "Comma-separated: LIVE, FILLED, CANCELLED, EXPIRED. Default: all. LIVE means the order is in the book; EXPIRED means the chain confirmed the book dropped it. Whether a LIVE row has passed its deadline is the separate includeExpired filter."),
         ("limit" = Option<i64>, Query, minimum = 1, maximum = 500, description = "Page size. Default 100, max 500; out-of-range values are rejected."),
         ("cursor" = Option<String>, Query, description = "Keyset cursor from a previous call's nextCursor."),
-        ("includeExpired" = Option<bool>, Query, description = "Include LIVE rows whose deadline has already passed. Default false — such an order is no longer matchable."),
+        ("includeExpired" = Option<bool>, Query, description = "Include orders that are in the book but past their deadline — present yet unmatchable. A filter of its own, composed with status. Default false."),
     ),
     security(()),
 )]
