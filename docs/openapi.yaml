@@ -376,7 +376,7 @@ paths:
           - 'null'
       - name: includeExpired
         in: query
-        description: Include orders that are in the book but past their deadline — present yet unmatchable. A filter of its own, composed with status. Default false.
+        description: Include orders that are in the book but past their deadline — present yet unmatchable. A filter of its own, composed with status. Default false. A tokenContract query returns such rows either way.
         required: false
         schema:
           type:

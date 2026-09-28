@@ -22,9 +22,9 @@ Implementation-facing requirements for the HTTP layer that serves the market-dat
 
 **Depth** — the `/api/v1/prediction/depth` response for one market outcome: sorted bid and ask price levels plus `lastUpdateId`. It is built from `live_orders`, not by querying the OrderBook contract during the HTTP request.
 
-**Resting liquidity** — orders currently on a book AND still matchable: rows with `status = 'OPEN' AND amount_remaining > 0 AND (deadline IS NULL OR deadline > now)`. On the inference side four readers share this one definition — [depth](#apiv1inferencedepth), the [`?liquidity=` listing filter](#resting-liquidity-filter-liquidity), [`/api/v1/inference/liquidity`](#apiv1inferenceliquidity) and the default LIVE view of [`/api/v1/inference/orders`](#apiv1inferenceorders) — so they cannot disagree about what is on the book.
+**Resting liquidity** — orders currently on a book AND still matchable: rows with `status = 'OPEN' AND amount_remaining > 0 AND (deadline IS NULL OR deadline > now)`. On the inference side three readers share this one definition — [depth](#apiv1inferencedepth), the [`?liquidity=` listing filter](#resting-liquidity-filter-liquidity) and [`/api/v1/inference/liquidity`](#apiv1inferenceliquidity) — so they cannot disagree about what is on the book. The default LIVE view of [`/api/v1/inference/orders`](#apiv1inferenceorders) applies the deadline half of it, except to a `tokenContract` lookup (see [§ includeExpired](#includeexpired)).
 
-**Lapsed order** — a row that is still in the book (stored `OPEN`) but whose `deadline` has passed. The book's matcher already skips it (`_isExpired` in `InferenceOrderBook.sol`: `deadline != 0 && block.timestamp >= deadline`); the chain has not yet emitted `InferenceOrderExpired`, so the order is still there and its status is still `OPEN`. Orthogonal to the public `EXPIRED` status, which only the event sets — see [§ Lapsed vs EXPIRED](#lapsed-vs-expired).
+**Lapsed order** — a row that is still in the book (stored `OPEN`) but whose `deadline` has passed. The book will not settle against it (`_isExpired` in `InferenceOrderBook.sol`: `deadline != 0 && block.timestamp >= deadline`), but it leaves the book only when a taker's match reaches it or someone calls the permissionless `expireOrder`; until the indexer projects the `InferenceOrderExpired` that follows, the order is still there and its status is still `OPEN`. Orthogonal to the public `EXPIRED` status, which only the event sets — see [§ Lapsed vs EXPIRED](#lapsed-vs-expired).
 
 **Trade tape** — a bare, newest-first list of maker↔taker matches built from an append-only table, never by querying the chain contract during the HTTP request. Two instances share this contract: `/api/v1/prediction/trades` (per market outcome, from the `trades` table) and `/api/v1/inference/trades` (per model order book, from the `inference_trades` table).
 
@@ -578,7 +578,7 @@ Two independent questions. Neither is derived from the other, and the read model
 
 **Is the order in the book?** That is the `status` axis, and the chain owns it. `LIVE` is exactly stored `OPEN`: the order is physically resting. Migration 0002 is explicit that a row whose `deadline` already sits in the past keeps that `OPEN` status until `InferenceOrderExpired` arrives, and the column comment forbids deriving a status from wall-clock. Nothing here changes that — `status` is read straight from the column, and a lapsed row is `LIVE` because it is, in fact, still in the book.
 
-**Can it still be matched?** A separate question with a separate answer, and the book has already given it: `_isExpired(deadline)` in `InferenceOrderBook.sol` is `deadline != 0 && block.timestamp >= deadline`, and the matching loops skip such a maker and drop it inline rather than settling against it. So a lapsed order is present and unmatchable at the same time — there is nothing contradictory about that, and no status can express it.
+**Can it still be matched?** A separate question with a separate answer, and the book has already given it: `_isExpired(deadline)` in `InferenceOrderBook.sol` is `deadline != 0 && block.timestamp >= deadline`, and the matching loops skip such a maker and drop it inline rather than settling against it. An order no taker's match reaches stays in the book until someone calls the permissionless `expireOrder`; nothing in this repository does, so that window has no upper bound. So a lapsed order is present and unmatchable at the same time — there is nothing contradictory about that, and no status can express it.
 
 Because the two are independent, the filters are too: `?status=` selects on presence, `?includeExpired=` selects on matchability, and they compose. Folding the deadline into the meaning of `LIVE` would have destroyed the distinction the chain maintains.
 
@@ -589,11 +589,11 @@ The read model must not paper over that gap. Quoting a lapsed order in depth adv
 | [`/api/v1/inference/depth`](#apiv1inferencedepth) | excluded | none — an unhittable order is not depth |
 | [`?liquidity=` filter](#resting-liquidity-filter-liquidity) | excluded | none |
 | [`/api/v1/inference/liquidity`](#apiv1inferenceliquidity) | excluded | none |
-| [`/api/v1/inference/orders`](#apiv1inferenceorders), `status=LIVE` | excluded by default | `?includeExpired=true` |
+| [`/api/v1/inference/orders`](#apiv1inferenceorders), `status=LIVE` | excluded by default, never on a `tokenContract` lookup | `?includeExpired=true` |
 
 `/orders` gets the opt-out because it is the row-level view: an operator chasing why a note's order never filled needs to see the row, and the response carries `deadline` and `serverTime` so the lapse is visible. The aggregate views do not, because there is nothing there to inspect — a lapsed order would simply inflate a number.
 
-Boundary and NULL follow the contract exactly: `deadline IS NULL` is the chain's `0`, good-till-cancel, which never lapses; `deadline == now` has already lapsed, matching `>=`. The clock is the handler's request `now`, so it is the same instant the response reports as `serverTime`.
+`deadline IS NULL` never lapses. On the current book it is a BUY placed with `deadline == 0`, good-till-cancel; every SELL carries a deadline. The one other source is a row projected from the retired `InferenceSubscriptionPlaced`, whose deadline the chain held but the event never published: it stays NULL until the reconciler's sweep recovers it, and until then there is nothing to compare. The boundary follows the contract exactly: `deadline == now` has already lapsed, matching `>=`. The clock is the handler's request `now`, so it is the same instant the response reports as `serverTime`.
 
 The remaining skew is between that wall-clock and `block.timestamp`. It is the same skew `/api/v1/oracles` already lives with for event availability, and it is one-sided in the safe direction on the read path: an order shown as resting a second before the chain would drop it is the pre-existing behaviour, not a regression.
 
@@ -615,13 +615,15 @@ Three public values, exhaustive over every row (`InferenceOrderStatus::ALL`):
 
 ### includeExpired
 
-`?includeExpired=` is parsed with `bool::from_str`, which accepts exactly `true` and `false`; anything else → `InvalidParameter` → `-1130` / 400. A typo must not quietly fall back to the default, because the default hides rows and the caller would have no way to notice.
+`?includeExpired=` is read through `non_blank_query` like every other filter on this endpoint, so a present-but-blank value → `MissingParameter` → `-1102` / 400; the rest is parsed with `bool::from_str`, which accepts exactly `true` and `false`; anything else → `InvalidParameter` → `-1130` / 400. Neither a typo nor an unbound template variable may quietly fall back to the default, because the default hides rows and the caller would have no way to notice.
 
 Absent → `false`. When false, the `LIVE` branch of the union carries `AND (deadline IS NULL OR deadline > $now)`, emitted alongside the `tokenContract` / `note` predicates rather than as part of the status term — it is one more independent filter on the row, not a redefinition of the status.
 
 It reaches only the `LIVE` branch as a consequence rather than a special case: the filter asks about an order that is *in the book* and past its deadline, and a `FILLED`, `CANCELLED` or `EXPIRED` row is not in the book, so nothing there can match the description.
 
-The predicate is a heap residual on that one branch rather than an index term, and costs nothing: every page column is read from the heap anyway, so the conjunct rides along with a fetch the query was already making. It does mean a book carrying many lapsed rows scans further to fill a page — bounded by the keyset `LIMIT`, and self-correcting as the chain emits the expiries.
+It is never applied to a `tokenContract` lookup. That query asks whether the TokenContract is in use — presence, not matchability — and a lapsed SELL still holds its TC's `_offerPosted` latch: the TC cannot post a new offer or close until the order leaves the book. Hiding the row would report the TC free while the chain still holds it, the one direction the [§ Fail-closed gate](#fail-closed-gate) exists to rule out.
+
+The predicate is a heap residual on that one branch rather than an index term, and is cheap per row: every page column is read from the heap anyway, so the conjunct rides along with a fetch the query was already making. It does mean a book carrying many lapsed rows scans further to fill a page, and those rows stay until a match or `expireOrder` removes them.
 
 ### Page-size protocol
 
@@ -701,6 +703,8 @@ Arm 1 (`tc_unknown`) logs at `error!` on **every** request that observes it, eva
 | `side` present and not `BUY` / `SELL` | `InvalidParameter` | `-1130` | 400 |
 | `status` CSV blank / whitespace-only | `MissingParameter` | `-1102` | 400 |
 | `status` CSV contains an unknown token | `InvalidParameter` | `-1130` | 400 |
+| `includeExpired` present but blank | `MissingParameter` | `-1102` | 400 |
+| `includeExpired` present and not exactly `true` / `false` | `InvalidParameter` | `-1130` | 400 |
 | `limit` out of `[1, 500]` (including values outside `u16` range) | `MissingParameter` | `-1102` | 400 |
 | `limit` present but non-numeric | `InvalidParameter` | `-1130` | 400 |
 | `cursor` — see [§ Cursor format](#cursor-format) | | | |

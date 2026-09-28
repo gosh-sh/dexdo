@@ -335,8 +335,9 @@ fn assemble_inference_market(row: InferenceMarketRow) -> Result<InferenceMarket,
 /// The deadline conjunct mirrors the book's own `_isExpired` (`deadline != 0 &&
 /// block.timestamp >= deadline`): the matcher skips a maker past its deadline,
 /// so quoting one would advertise liquidity no taker can hit. A NULL deadline
-/// is the chain's `0` — good-till-cancel — and never expires. This is a
-/// question about matchability, not about status: the row keeps the `OPEN`
+/// never expires: on the current book it is a good-till-cancel BUY (the
+/// exception, a legacy subscription row, is on `inference_orders.deadline`).
+/// This is a question about matchability, not about status: the row keeps the `OPEN`
 /// status the chain gave it until `InferenceOrderExpired` arrives, exactly as
 /// migration 0002 requires.
 ///
@@ -387,8 +388,12 @@ async fn get_inference_liquidity_impl(
                            filter (where io.is_buy), 0)::text     as bid_ticks,
                   coalesce(sum(io.amount_remaining)
                            filter (where not io.is_buy), 0)::text as ask_ticks,
-                  count(io.order_id) filter (where io.is_buy)     as bid_orders,
-                  count(io.order_id) filter (where not io.is_buy) as ask_orders
+                  -- `count(*)`, not `count(io.order_id)`: `order_id` is not in
+                  -- `inference_orders_liquidity_idx`, and naming it forces a heap
+                  -- fetch per order. The LEFT JOIN's null-extended row has a NULL
+                  -- `is_buy`, so neither filter counts it.
+                  count(*) filter (where io.is_buy)               as bid_orders,
+                  count(*) filter (where not io.is_buy)           as ask_orders
              from inference_markets im
              left join inference_orders io
                     on io.orderbook_address = im.orderbook_address
@@ -778,18 +783,25 @@ fn build_snapshot_query<'a>(
                 }
                 // Expiry is its own filter, composed with the others above rather than
                 // folded into the status. `status` answers "is the order in the book";
-                // this answers "can it still be matched", and the two are independent
-                // questions about the same row — the book skips a maker past its
-                // deadline (`_isExpired`) long before the chain emits
-                // `InferenceOrderExpired` and the stored status changes.
+                // this answers "can it still be matched". The book will not settle
+                // against a maker past its deadline (`_isExpired`), yet the order stays
+                // in the book — and the row OPEN — until a taker's match reaches it or
+                // someone calls `expireOrder`, and the indexer projects the
+                // `InferenceOrderExpired` that follows.
                 //
-                // It reaches only the LIVE branch as a consequence, not a special case:
-                // a row that is FILLED, CANCELLED or EXPIRED is not in the book at all,
-                // so "still in the book, but past its deadline" cannot describe it.
+                // Applied only to the LIVE branch: a FILLED, CANCELLED or EXPIRED row is
+                // not in the book, so "in the book past its deadline" cannot describe it.
                 //
-                // The residual is free: every page column is read from the heap anyway,
+                // Never to a TokenContract lookup. That asks whether the TC is in use,
+                // which is presence, not matchability: a lapsed SELL still holds its
+                // TC's offer latch, and hiding it would report the TC free.
+                //
+                // The residual is cheap: every page column is read from the heap anyway,
                 // so the conjunct rides along with a fetch the query already makes.
-                if !q.include_expired && matches!(status, InferenceOrderStatus::Live) {
+                if !q.include_expired
+                    && q.token_contract.is_none()
+                    && matches!(status, InferenceOrderStatus::Live)
+                {
                     b.push(" and (deadline is null or deadline > ");
                     b.push_bind(q.now);
                     b.push(")");

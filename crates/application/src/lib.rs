@@ -369,18 +369,21 @@ pub struct InferenceOrdersQuery {
     /// false, to cut LIVE rows whose deadline has passed.
     pub now: i64,
     /// Serve rows that are in the book but past their deadline. `false` (the
-    /// default) hides them; `true` restores the unfiltered view.
+    /// default) hides them; `true` disables the deadline cut.
     ///
     /// An independent filter, composed with `statuses` rather than part of it.
     /// `statuses` asks which rows to select; this asks whether a selected row
-    /// can still be matched. The book skips a maker past its deadline
-    /// (`_isExpired`) long before the chain emits `InferenceOrderExpired`, so
-    /// the two questions have different answers for a real window of time —
-    /// and the row's `status` stays whatever the chain last said either way.
+    /// can still be matched. The book will not settle against a maker past its
+    /// deadline (`_isExpired`), yet the order stays in the book until a
+    /// taker's match reaches it or someone calls `expireOrder` — so the two
+    /// questions have different answers for an unbounded window, and the row's
+    /// `status` stays whatever the chain last said either way.
     ///
-    /// It happens to bite only on `Live` rows, because only an order that is
-    /// in the book can be "in the book past its deadline"; a FILLED,
-    /// CANCELLED or EXPIRED row left the book already.
+    /// Applies only to `Live` rows, because only an order that is in the book
+    /// can be "in the book past its deadline"; a FILLED, CANCELLED or EXPIRED
+    /// row left the book already. Ignored when `token_contract` is set: that
+    /// lookup asks whether the TokenContract is in use, and a lapsed SELL
+    /// still holds it.
     pub include_expired: bool,
 }
 

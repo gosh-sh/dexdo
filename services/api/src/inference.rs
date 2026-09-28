@@ -432,7 +432,7 @@ struct InferenceOrderDto {
         ("status" = Option<Vec<dto::InferenceOrderStatus>>, Query, style = Form, explode = false, description = "Comma-separated: LIVE, FILLED, CANCELLED, EXPIRED. Default: all. LIVE means the order is in the book; EXPIRED means the chain confirmed the book dropped it. Whether a LIVE row has passed its deadline is the separate includeExpired filter."),
         ("limit" = Option<i64>, Query, minimum = 1, maximum = 500, description = "Page size. Default 100, max 500; out-of-range values are rejected."),
         ("cursor" = Option<String>, Query, description = "Keyset cursor from a previous call's nextCursor."),
-        ("includeExpired" = Option<bool>, Query, description = "Include orders that are in the book but past their deadline — present yet unmatchable. A filter of its own, composed with status. Default false."),
+        ("includeExpired" = Option<bool>, Query, description = "Include orders that are in the book but past their deadline — present yet unmatchable. A filter of its own, composed with status. Default false. A tokenContract query returns such rows either way."),
     ),
     security(()),
 )]
@@ -454,6 +454,9 @@ pub(crate) async fn get_inference_orders(
 
     let address = non_blank_query(req, "inferenceOrderBookAddress")?
         .ok_or(ApiError::from(DomainError::MissingParameter))?;
+    // One clock for both: clients compare `deadline` against `serverTime`, so
+    // the rows must be cut at the instant the response reports.
+    let now = now_seconds();
     let input = GetInferenceOrdersInput {
         orderbook_address: address.clone(),
         token_contract: non_blank_query(req, "tokenContract")?,
@@ -464,11 +467,14 @@ pub(crate) async fn get_inference_orders(
         // MissingParameter inside the use case, matching prediction/orders.
         limit: optional_typed_query::<i64>(req, "limit")?,
         cursor: req.query::<String>("cursor"),
-        now: now_seconds(),
-        // `bool::from_str` takes exactly `true` / `false`; anything else is
-        // InvalidParameter rather than a silent default, so a typo cannot turn
-        // into "expired rows hidden" without the caller noticing.
-        include_expired: optional_typed_query::<bool>(req, "includeExpired")?,
+        now,
+        // Blank is MissingParameter like every filter here, and `bool::from_str`
+        // takes exactly `true` / `false`, anything else being InvalidParameter —
+        // so neither a typo nor an unbound template variable can fall back to
+        // the default, which hides rows.
+        include_expired: non_blank_query(req, "includeExpired")?
+            .map(|v| v.parse::<bool>().map_err(|_| ApiError::from(DomainError::InvalidParameter)))
+            .transpose()?,
     };
 
     let use_case = GetInferenceOrdersUseCase::new(inference_repo);
@@ -481,7 +487,7 @@ pub(crate) async fn get_inference_orders(
     // scan was truncated. Derive the wire `hasMore` from it before the field is moved.
     let has_more = page.next_cursor.is_some();
     Ok(Json(InferenceOrdersResponse {
-        server_time: now_seconds(),
+        server_time: now,
         last_update_id: page.last_update_id,
         next_cursor: page.next_cursor,
         has_more,

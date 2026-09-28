@@ -166,14 +166,13 @@ fn query(ob: &str) -> InferenceOrdersQuery {
         limit: OrdersLimit::DEFAULT,
         cursor: None,
         now: NOW,
-        // This suite seeds no deadlines, so the default (hide past-deadline
-        // LIVE rows) changes nothing here. Expiry is covered in
-        // `inference_liquidity.rs`.
+        // The endpoint's default: LIVE rows past their deadline are hidden.
         include_expired: false,
     }
 }
 
-/// Request clock. Immaterial while every fixture is good-till-cancel.
+/// Request clock. Fixtures seeded without a deadline never lapse against it;
+/// the expiry tests below seed deadlines around it.
 const NOW: i64 = 1_700_000_000;
 
 trait QueryBuilderExt {
@@ -772,10 +771,12 @@ async fn live_hides_a_past_deadline_order_until_include_expired() {
     let ob = "0:inf_orders_expiry";
     purge(&pool, ob).await;
     seed_reconciled_market(&pool, ob).await;
-    // 1 lapsed, 2 still good, 3 good-till-cancel.
+    // 1 lapsed, 2 still good, 3 good-till-cancel, 4 lapsed at exactly `now`
+    // (`_isExpired` is `block.timestamp >= deadline`).
     seed_order_until(&pool, ob, 1, true, "OPEN", None, Some(NOW - 1)).await;
     seed_order_until(&pool, ob, 2, true, "OPEN", None, Some(NOW + 1000)).await;
     seed_order(&pool, ob, 3, true, "OPEN", None).await;
+    seed_order_until(&pool, ob, 4, true, "OPEN", None, Some(NOW)).await;
 
     let repo = PostgresReadModelRepository::new(pool.clone());
     let ids = |page: dodex_application::InferenceOrdersPage| {
@@ -785,7 +786,7 @@ async fn live_hides_a_past_deadline_order_until_include_expired() {
     };
 
     let default = ids(repo.list_inference_orders(&query(ob).status(&[Live])).await.unwrap());
-    assert_eq!(default, vec!["2".to_string(), "3".to_string()], "the lapsed order is hidden");
+    assert_eq!(default, vec!["2".to_string(), "3".to_string()], "the lapsed orders are hidden");
 
     let all = ids(repo
         .list_inference_orders(&query(ob).status(&[Live]).include_expired())
@@ -793,9 +794,67 @@ async fn live_hides_a_past_deadline_order_until_include_expired() {
         .unwrap());
     assert_eq!(
         all,
-        vec!["1".to_string(), "2".to_string(), "3".to_string()],
+        vec!["1".to_string(), "2".to_string(), "3".to_string(), "4".to_string()],
         "includeExpired=true restores the unfiltered view",
     );
+
+    purge(&pool, ob).await;
+}
+
+#[tokio::test]
+async fn the_default_status_set_hides_only_the_lapsed_live_row() {
+    let Some(pool) = test_pool().await else { return };
+    let _guard = CAPTURE_CURSOR_LOCK.lock().await;
+    seed_at_head(&pool).await;
+    let ob = "0:inf_orders_expiry_all_statuses";
+    purge(&pool, ob).await;
+    seed_reconciled_market(&pool, ob).await;
+    // No `status` is the common call. Of these, only the lapsed LIVE row is
+    // both in the book and unmatchable.
+    seed_order_until(&pool, ob, 1, true, "OPEN", None, Some(NOW - 1)).await;
+    seed_order_until(&pool, ob, 2, true, "FILLED", None, Some(NOW - 1)).await;
+    seed_order_until(&pool, ob, 3, true, "EXPIRED", None, Some(NOW - 1)).await;
+    seed_order(&pool, ob, 4, true, "OPEN", None).await;
+
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let ids = |page: dodex_application::InferenceOrdersPage| {
+        let mut v: Vec<String> = page.orders.into_iter().map(|o| o.order_id).collect();
+        v.sort();
+        v
+    };
+
+    let default = ids(repo.list_inference_orders(&query(ob)).await.unwrap());
+    assert_eq!(default, vec!["2".to_string(), "3".to_string(), "4".to_string()]);
+
+    let all = ids(repo.list_inference_orders(&query(ob).include_expired()).await.unwrap());
+    assert_eq!(all, vec!["1".to_string(), "2".to_string(), "3".to_string(), "4".to_string()]);
+
+    purge(&pool, ob).await;
+}
+
+#[tokio::test]
+async fn a_hidden_lapsed_row_does_not_break_pagination() {
+    let Some(pool) = test_pool().await else { return };
+    let _guard = CAPTURE_CURSOR_LOCK.lock().await;
+    seed_at_head(&pool).await;
+    let ob = "0:inf_orders_expiry_paging";
+    purge(&pool, ob).await;
+    seed_reconciled_market(&pool, ob).await;
+    // The lapsed row sits between two live ones. The deadline cut must run
+    // before `limit`, or a page would come back short or claim a next page
+    // that holds nothing.
+    seed_order(&pool, ob, 3, true, "OPEN", None).await;
+    seed_order_until(&pool, ob, 2, true, "OPEN", None, Some(NOW - 1)).await;
+    seed_order(&pool, ob, 1, true, "OPEN", None).await;
+
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let first = repo.list_inference_orders(&query(ob).limit(1)).await.unwrap();
+    assert_eq!(first.orders.iter().map(|o| o.order_id.as_str()).collect::<Vec<_>>(), ["3"]);
+    assert_eq!(first.next_cursor.as_deref(), Some("3"));
+
+    let second = repo.list_inference_orders(&query(ob).limit(1).cursor("3")).await.unwrap();
+    assert_eq!(second.orders.iter().map(|o| o.order_id.as_str()).collect::<Vec<_>>(), ["1"]);
+    assert!(second.next_cursor.is_none(), "the lapsed row must not leave a phantom page");
 
     purge(&pool, ob).await;
 }
@@ -839,6 +898,30 @@ async fn expiry_does_not_touch_terminal_rows() {
     let repo = PostgresReadModelRepository::new(pool.clone());
     let page = repo.list_inference_orders(&query(ob).status(&[Filled])).await.unwrap();
     assert_eq!(page.orders.len(), 1, "a terminal row is never hidden by the deadline filter");
+
+    purge(&pool, ob).await;
+}
+
+#[tokio::test]
+async fn a_token_contract_lookup_still_finds_a_lapsed_sell() {
+    let Some(pool) = test_pool().await else { return };
+    let _guard = CAPTURE_CURSOR_LOCK.lock().await;
+    seed_at_head(&pool).await;
+    let ob = "0:inf_orders_expiry_tc";
+    purge(&pool, ob).await;
+    seed_reconciled_market(&pool, ob).await;
+    // Every SELL carries a deadline, and one past it is still in the book: its
+    // TokenContract's offer latch stays set until a match or `expireOrder`
+    // drops the order. A TokenContract lookup asks whether the TC is in use,
+    // so hiding this row would report the TC free while the chain holds it.
+    seed_order_until(&pool, ob, 1, false, "OPEN", Some("0:tc-lapsed"), Some(NOW - 1)).await;
+
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let page = repo
+        .list_inference_orders(&query(ob).token_contract("0:tc-lapsed").side(Sell).status(&[Live]))
+        .await
+        .unwrap();
+    assert_eq!(page.orders.len(), 1, "a lapsed SELL still holds its TokenContract");
 
     purge(&pool, ob).await;
 }

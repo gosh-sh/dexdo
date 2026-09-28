@@ -3,7 +3,7 @@
 // Repo-level coverage for resting liquidity on the inference read path: the
 // `?liquidity=` filter on /api/v1/inference/markets and the per-book totals
 // behind /api/v1/inference/liquidity. Both read `inference_orders` through the
-// same "OPEN and something left on it" definition `/api/v1/inference/depth`
+// same "OPEN, something left on it, not past its deadline" definition `/api/v1/inference/depth`
 // aggregates, so they are exercised against the same seeded books here.
 // Gated on TEST_DATABASE_URL — see inference_read_repo.rs for the harness.
 
@@ -170,6 +170,8 @@ async fn assert_listing(pool: &PgPool, filter: LiquidityFilter, present: &[&str]
         }))
         .await
         .expect("listing");
+    // An absence check means nothing if the book merely fell off this page.
+    assert!(!page.has_more, "?liquidity={} outgrew one page", filter.as_str());
     let got: Vec<String> = page.markets.iter().map(|m| m.orderbook_address.clone()).collect();
 
     for tag in present {
@@ -453,15 +455,26 @@ async fn depth_and_liquidity_agree_about_what_is_resting() {
     open_order_until(&pool, "agree", 3, true, "999", NOW - 1).await; // lapsed
     seed_order(&pool, "agree", 4, true, "999", "CANCELLED", false, None).await; // closed
     seed_order(&pool, "agree", 5, true, "0", "OPEN", false, None).await; // exhausted
+    open_order_until(&pool, "agree", 6, true, "999", NOW).await; // lapsed at the boundary
+
+    // Depth builds each side in its own branch, so the ask side gets its own
+    // survivors and exclusions.
+    open_order(&pool, "agree", 7, false, "40").await; // counts
+    open_order_until(&pool, "agree", 8, false, "999", NOW - 1).await; // lapsed
+    open_order_until(&pool, "agree", 9, false, "999", NOW).await; // lapsed at the boundary
 
     let repo = PostgresReadModelRepository::new(pool.clone());
     let depth = repo.get_inference_depth(&ob_of("agree"), 100, NOW).await.expect("depth");
-    // Both survivors rest at the same price, so they collapse into one level.
-    let depth_bid_ticks: u64 =
-        depth.bids.iter().map(|l| l.quantity.parse::<u64>().expect("integer ticks")).sum();
-    assert_eq!(depth_bid_ticks, 150);
+    // Survivors on a side rest at the same price, so they collapse into one level.
+    let sum = |levels: &[dodex_domain::PriceLevel]| -> u64 {
+        levels.iter().map(|l| l.quantity.parse::<u64>().expect("integer ticks")).sum()
+    };
+    assert_eq!(sum(&depth.bids), 150);
+    assert_eq!(sum(&depth.asks), 40);
 
     let liq = liquidity(&pool, "agree").await.expect("liquidity");
-    assert_eq!(liq.bid_ticks, depth_bid_ticks.to_string(), "depth and totals must agree");
+    assert_eq!(liq.bid_ticks, "150", "depth and totals must agree");
     assert_eq!(liq.bid_orders, 2);
+    assert_eq!(liq.ask_ticks, "40", "depth and totals must agree");
+    assert_eq!(liq.ask_orders, 1);
 }
