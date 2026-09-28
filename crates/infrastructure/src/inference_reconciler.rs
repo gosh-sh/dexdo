@@ -742,8 +742,8 @@ impl InferenceReconciler {
     ///
     /// Each column is applied only when the row is missing it AND the getter supplied one,
     /// so a row whose remaining NULL is intentional is never rewritten — a bare
-    /// `IS NULL` predicate stays true forever on healthy rows (a BUY's TC, a resting SELL's
-    /// deadline) and would churn `updated_at` every cycle. Returns the number of rows
+    /// `IS NULL` predicate stays true forever on healthy rows (a BUY's TC, a good-till-cancel
+    /// BUY's deadline) and would churn `updated_at` every cycle. Returns the number of rows
     /// changed, for logging only.
     pub async fn repair_order_fields(
         &self,

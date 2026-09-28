@@ -335,8 +335,9 @@ fn assemble_inference_market(row: InferenceMarketRow) -> Result<InferenceMarket,
 /// The deadline conjunct mirrors the book's own `_isExpired` (`deadline != 0 &&
 /// block.timestamp >= deadline`): the matcher skips a maker past its deadline,
 /// so quoting one would advertise liquidity no taker can hit. A NULL deadline
-/// never expires: on the current book it is a good-till-cancel BUY (the
-/// exception, a legacy subscription row, is on `inference_orders.deadline`).
+/// never expires: from contract 4.0.33 on it is a good-till-cancel BUY; older
+/// books also hold deadline-0 SELLs and legacy subscription rows (see the
+/// `inference_orders.deadline` column in data-schema.md).
 /// This is a question about matchability, not about status: the row keeps the `OPEN`
 /// status the chain gave it until `InferenceOrderExpired` arrives, exactly as
 /// migration 0002 requires.
@@ -785,9 +786,9 @@ fn build_snapshot_query<'a>(
                 // folded into the status. `status` answers "is the order in the book";
                 // this answers "can it still be matched". The book will not settle
                 // against a maker past its deadline (`_isExpired`), yet the order stays
-                // in the book — and the row OPEN — until a taker's match reaches it or
-                // someone calls `expireOrder`, and the indexer projects the
-                // `InferenceOrderExpired` that follows.
+                // in the book — and the row OPEN — until a taker's match reaches it,
+                // someone calls `expireOrder`, or its owner cancels it, and the indexer
+                // projects the event that follows.
                 //
                 // Applied only to the LIVE branch: a FILLED, CANCELLED or EXPIRED row is
                 // not in the book, so "in the book past its deadline" cannot describe it.

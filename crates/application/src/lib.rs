@@ -365,8 +365,9 @@ pub struct InferenceOrdersQuery {
     pub statuses: InferenceOrderStatusSet,
     pub limit: OrdersLimit,
     pub cursor: Option<InferenceOrdersCursor>,
-    /// Request wall-clock, unix seconds. Read only when `include_expired` is
-    /// false, to cut LIVE rows whose deadline has passed.
+    /// Request wall-clock, unix seconds. Read only when the deadline cut
+    /// applies — `include_expired` false and no `token_contract` — to cut LIVE
+    /// rows whose deadline has passed.
     pub now: i64,
     /// Serve rows that are in the book but past their deadline. `false` (the
     /// default) hides them; `true` disables the deadline cut.
@@ -375,7 +376,8 @@ pub struct InferenceOrdersQuery {
     /// `statuses` asks which rows to select; this asks whether a selected row
     /// can still be matched. The book will not settle against a maker past its
     /// deadline (`_isExpired`), yet the order stays in the book until a
-    /// taker's match reaches it or someone calls `expireOrder` — so the two
+    /// taker's match reaches it, someone calls `expireOrder`, or its owner
+    /// cancels it — so the two
     /// questions have different answers for an unbounded window, and the row's
     /// `status` stays whatever the chain last said either way.
     ///
