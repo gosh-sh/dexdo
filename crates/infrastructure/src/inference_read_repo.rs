@@ -390,8 +390,9 @@ fn assemble_inference_market(row: InferenceMarketRow) -> Result<InferenceMarket,
 /// (`InferenceOrderExpired`, or `InferenceOrderCancelled` on an owner's cancel),
 /// exactly as migration 0002 requires.
 ///
-/// `$4` is the request clock. Only this fragment references it, so the caller
-/// binds it only when a filter is present — see `fetch_listing_inference`.
+/// `$4` is the request clock. The listing always binds it, filter or not,
+/// because the top-of-book joins reference it too — see
+/// `fetch_listing_inference`.
 ///
 /// The side comes from an allow-listed enum and is rendered as a literal, so
 /// the fragment adds no bind of its own and cannot disturb `$N` numbering.
