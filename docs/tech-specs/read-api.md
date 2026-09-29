@@ -22,7 +22,7 @@ Implementation-facing requirements for the HTTP layer that serves the market-dat
 
 **Depth** — the `/api/v1/prediction/depth` response for one market outcome: sorted bid and ask price levels plus `lastUpdateId`. It is built from `live_orders`, not by querying the OrderBook contract during the HTTP request.
 
-**Resting liquidity** — orders currently on a book AND still matchable: rows with `status = 'OPEN' AND amount_remaining > 0 AND (deadline IS NULL OR deadline > now)`. On the inference side three readers share this one definition — [depth](#apiv1inferencedepth), the [`?liquidity=` listing filter](#resting-liquidity-filter-liquidity) and [`/api/v1/inference/liquidity`](#apiv1inferenceliquidity) — so they cannot disagree about what is on the book. The default LIVE view of [`/api/v1/inference/orders`](#apiv1inferenceorders) applies the deadline half of it, except to a `tokenContract` lookup (see [§ includeExpired](#includeexpired)).
+**Resting liquidity** — orders currently on a book AND still matchable: rows with `status = 'OPEN' AND amount_remaining > 0 AND (deadline IS NULL OR deadline > now)`. On the inference side three readers share this one definition — [depth](#apiv1inferencedepth) (its levels and its whole-book totals alike), the [`?liquidity=` listing filter](#resting-liquidity-filter-liquidity) and the per-market [top of book](#top-of-book-bestbid--bestask) — so they cannot disagree about what is on the book. The default LIVE view of [`/api/v1/inference/orders`](#apiv1inferenceorders) applies the deadline half of it, except to a `tokenContract` lookup (see [§ includeExpired](#includeexpired)).
 
 **Lapsed order** — a row that is still in the book (stored `OPEN`) but whose `deadline` has passed. The book will not settle against it (`_isExpired` in `InferenceOrderBook.sol`: `deadline != 0 && block.timestamp >= deadline`), but it leaves the book only when a taker's match reaches it, someone calls the permissionless `expireOrder`, or its owner cancels it; until the indexer projects the event that follows, the row stays `OPEN`. Orthogonal to the public `EXPIRED` status, which only the event sets — see [§ Lapsed vs EXPIRED](#lapsed-vs-expired).
 
@@ -458,7 +458,7 @@ Both fetch paths (single-market and listing) share one builder, so the two canno
 
 The predicate is an `EXISTS` semi-join on `inference_orders.orderbook_address`, emitted per side: `BUY` adds `AND io.is_buy`, `SELL` adds `AND NOT io.is_buy`, `ANY` constrains neither, `BOTH` emits two independent `EXISTS`. Two properties are load-bearing:
 
-- **Existential, never aggregate.** The semi-join stops at the first matching row, so the filter costs one index probe per candidate book instead of a scan of its book. Summing here would make the listing's cost proportional to every open order on every visible book — which is why the totals live in [`/api/v1/inference/liquidity`](#apiv1inferenceliquidity), scoped to a single book, and why the listing response carries no tick counts.
+- **Existential, never aggregate.** The semi-join stops at the first matching row, so the filter costs one index probe per candidate book instead of a scan of its book. Summing here would make the listing's cost proportional to every open order on every visible book — which is why the listing carries no tick counts — [`/api/v1/inference/depth`](#apiv1inferencedepth) reports the whole-book totals for one book, where that scan is already being paid for.
 - **No outcome dimension.** An `InferenceOrderBook` is one book per model, so `orderbook_address` plus a side is the whole key — exactly the leading edge of `inference_orders_liquidity_idx` (migration 0006). The prediction side needs an extra rule here (a market matches when *any* outcome quotes the side); the inference side does not.
 
 The side is an allow-listed enum (`LiquidityFilter::parse`) rendered as a literal SQL fragment; it consumes no bind parameter, so the listing's fixed `$1..$3` numbering is untouched. An unparseable value is `InvalidParameter` → 400. Unlike `status` — validated but not a predicate, since every visible row is `TRADING` — this one actually filters.
@@ -502,6 +502,8 @@ One SQL query produces both sides. Per side, the database:
 2. Groups by `price`, sums `amount_remaining` — orders at one price collapse into one level (`[pricePerTick, ticks]`).
 3. Orders by price (bids DESC, asks ASC), `LIMIT $limit`. The partial index `inference_orders_open_book_idx` (`WHERE status = 'OPEN'`) backs this.
 
+Each branch also carries `sum(sum(amount_remaining)) over ()` — a window over the GROUPed rows, which SQL evaluates after `GROUP BY` but before `ORDER BY` / `LIMIT`. It therefore totals every price level of the side even though only `limit` of them are returned, and it rides the scan the `GROUP BY` is already making rather than adding a second pass. Every row of a side repeats that side's total; an empty side has no rows, which the projection reads as `"0"` rather than a missing answer. The totals are scaled like a level's quantity, so adding the returned levels up lands on the same number whenever `limit` did not truncate them.
+
 Each side is then re-sorted in Rust with exact-numeric `BigUint` comparison (lexicographic string order would misrank prices of differing length). Price is decoded ÷ `10^9` (SHELL atoms → SHELL) and formatted at `price_precision`; quantity (ticks) is integer, formatted at `quantity_precision = 0`.
 
 ### `lastUpdateId`
@@ -513,6 +515,7 @@ Each side is then re-sorted in Rust with exact-numeric `BigUint` comparison (lex
 1. `bids` DESC, `asks` ASC by price, exact-numeric.
 2. One `[price, quantity]` per price level; quantity is the summed resting ticks.
 3. `lastUpdateId` scoped to the book; empty string before any event; never lex-decreases.
+4. `totalBidTicks` / `totalAskTicks` cover the whole side regardless of `limit`, and equal the sum of the returned levels whenever `limit` did not truncate them.
 
 ### Error mapping
 
@@ -522,40 +525,6 @@ Each side is then re-sorted in Rust with exact-numeric `BigUint` comparison (lex
 | Reconciled book with NULL/blank `orderbook_address` | `MarketInconsistent` | 503 |
 | Missing `inferenceOrderBookAddress` | `MissingParameter` | 400 |
 | Invalid `limit` (non-numeric) | `InvalidParameter` | 400 |
-
-## `/api/v1/inference/liquidity`
-
-Returns how many ticks are resting on one model's book, summed per side. It is the aggregate companion to [`/api/v1/inference/depth`](#apiv1inferencedepth): depth lists individual price levels, liquidity collapses the whole book into `bidTicks` / `askTicks` / `bidOrders` / `askOrders`. Public (`NONE`), read-model only — no contract call at request time. Public contract in [api-spec.md](../api-spec.md#inference-liquidity).
-
-### Scope
-
-`inferenceOrderBookAddress` is mandatory, and there is deliberately no all-books mode: the response aggregates a whole book, so an unscoped variant would let one unauthenticated request sum every open order on the exchange. The screening path is [`/api/v1/inference/markets?liquidity=`](#resting-liquidity-filter-liquidity) — an existential filter that stays O(1) per book — followed by this endpoint per book of interest.
-
-### Aggregation
-
-One SQL statement covers resolution and aggregation:
-
-1. `inference_markets` gated on `last_reconciled_at IS NOT NULL` — the same [visibility filter](#visibility-filter-1) the listing applies.
-2. `LEFT JOIN inference_orders` on `orderbook_address` with `status = 'OPEN' AND amount_remaining > 0 AND (deadline IS NULL OR deadline > $2)` — the same definition of "resting" the depth aggregation and the `?liquidity=` filter use, so the three cannot disagree. `$2` is the handler's clock, which is also what the response reports as `serverTime`: the totals are never cut at a different instant from the one they are stamped with.
-3. `sum(amount_remaining) FILTER (WHERE …is_buy)` and `count(…) FILTER (…)` per side.
-
-The LEFT JOIN is what turns an empty book into zero totals instead of a missing row. Zero rows overall means the book is unknown or still behind the visibility gate — both collapse to `InvalidMarketOrSymbol` → 404, exactly as in depth, so a probe cannot tell them apart.
-
-Ticks are rendered like a depth level's quantity: `scale_uint_to_decimal` at the book's `quantity_precision`, which is `0` for a real book, so a tick total is a bare integer. A NULL precision on a reconciled row is read-model corruption and lifts to `MarketInconsistent` → 503 via `inference_scale` — the same guard depth uses — rather than being served as an unscaled number. That check runs on the row itself, so it fires on an empty book too.
-
-`contractVersion` is passed through from [`inference_markets.version`](data-schema.md#inference_markets), the same column and same contract-vs-model distinction as depth.
-
-### Empty-book contract
-
-A book with nothing resting returns `"0"` totals and zero counts, never a 404 — the same shape guarantee as depth's empty `bids`/`asks`.
-
-### Error mapping
-
-| Condition | DomainError | HTTP |
-| --- | --- | --- |
-| `inferenceOrderBookAddress` unknown or pre-reconcile | `InvalidMarketOrSymbol` | 404 |
-| Missing `inferenceOrderBookAddress` | `MissingParameter` | 400 |
-| NULL `quantity_precision` on a reconciled book | `MarketInconsistent` | 503 |
 
 ## `/api/v1/inference/orders`
 
@@ -598,7 +567,6 @@ The read model must not paper over that gap. Quoting a lapsed order in depth adv
 | --- | --- | --- |
 | [`/api/v1/inference/depth`](#apiv1inferencedepth) | excluded | none — an unhittable order is not depth |
 | [`?liquidity=` filter](#resting-liquidity-filter-liquidity) | excluded | none |
-| [`/api/v1/inference/liquidity`](#apiv1inferenceliquidity) | excluded | none |
 | [`/api/v1/inference/orders`](#apiv1inferenceorders), `status=LIVE` | excluded by default, never on a `tokenContract` lookup | `?includeExpired=true` |
 
 `/orders` gets the opt-out because it is the row-level view: an operator chasing why a note's order never filled needs to see the row, and the response carries `deadline` and `serverTime` so the lapse is visible. The aggregate views do not, because there is nothing there to inspect — a lapsed order would simply inflate a number.

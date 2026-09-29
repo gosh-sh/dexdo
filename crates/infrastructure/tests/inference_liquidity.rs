@@ -1,10 +1,11 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
 // Repo-level coverage for resting liquidity on the inference read path: the
-// `?liquidity=` filter on /api/v1/inference/markets and the per-book totals
-// behind /api/v1/inference/liquidity. Both read `inference_orders` through the
-// same "OPEN, something left on it, not past its deadline" definition `/api/v1/inference/depth`
-// aggregates, so they are exercised against the same seeded books here.
+// `?liquidity=` filter and the per-market top of book on
+// /api/v1/inference/markets, and the levels and whole-book totals on
+// /api/v1/inference/depth. All of them read `inference_orders` through the same
+// "OPEN, something left on it, not past its deadline" definition, so they are
+// exercised against the same seeded books here.
 // Gated on TEST_DATABASE_URL — see inference_read_repo.rs for the harness.
 
 use std::env;
@@ -15,7 +16,7 @@ use dodex_application::InferenceMarketsRequest;
 use dodex_application::InferenceMarketsSort;
 use dodex_application::InferenceReadRepository;
 use dodex_domain::DomainError;
-use dodex_domain::InferenceLiquidity;
+use dodex_domain::InferenceDepthSnapshot;
 use dodex_domain::LiquidityFilter;
 use dodex_infrastructure::database;
 use dodex_infrastructure::postgres_repo::PostgresReadModelRepository;
@@ -241,9 +242,10 @@ async fn assert_listing(pool: &PgPool, filter: LiquidityFilter, present: &[&str]
     }
 }
 
-async fn liquidity(pool: &PgPool, tag: &str) -> Result<InferenceLiquidity, anyhow::Error> {
+/// The book's depth snapshot — the whole-book tick totals now live on it.
+async fn depth(pool: &PgPool, tag: &str) -> Result<InferenceDepthSnapshot, anyhow::Error> {
     let repo = PostgresReadModelRepository::new(pool.clone());
-    repo.get_inference_liquidity(&ob_of(tag), NOW).await
+    repo.get_inference_depth(&ob_of(tag), 100, NOW).await
 }
 
 /// The four books every filter test shares: one quoting each side, one quoting
@@ -316,15 +318,13 @@ async fn closed_and_exhausted_orders_are_not_liquidity() {
     assert_listing(&pool, LiquidityFilter::Any, &[], &["closed"]).await;
 
     // The totals must agree with the filter: same rows, same verdict.
-    let liq = liquidity(&pool, "closed").await.expect("liquidity");
-    assert_eq!(liq.bid_ticks, "0");
-    assert_eq!(liq.ask_ticks, "0");
-    assert_eq!(liq.bid_orders, 0);
-    assert_eq!(liq.ask_orders, 0);
+    let d = depth(&pool, "closed").await.expect("depth");
+    assert_eq!(d.total_bid_ticks, "0");
+    assert_eq!(d.total_ask_ticks, "0");
 }
 
 #[tokio::test]
-async fn totals_sum_ticks_and_orders_per_side() {
+async fn depth_totals_cover_the_whole_book_per_side() {
     let Some(pool) = setup().await else { return };
     seed_book(&pool, "totals", CHAIN_TIME).await;
     open_order(&pool, "totals", 1, true, "100").await;
@@ -334,55 +334,21 @@ async fn totals_sum_ticks_and_orders_per_side() {
     // counts it. Excluding it would make the two endpoints disagree.
     seed_order(&pool, "totals", 4, false, "5", "OPEN", true, None).await;
 
-    let liq = liquidity(&pool, "totals").await.expect("liquidity");
-    assert_eq!(liq.orderbook_address, ob_of("totals"));
-    assert_eq!(liq.bid_ticks, "150");
-    assert_eq!(liq.bid_orders, 2);
-    assert_eq!(liq.ask_ticks, "30", "the subscription's 5 ticks are part of the ask side");
-    assert_eq!(liq.ask_orders, 2);
+    let d = depth(&pool, "totals").await.expect("depth");
+    assert_eq!(d.total_bid_ticks, "150");
+    assert_eq!(d.total_ask_ticks, "30", "the subscription's 5 ticks are part of the ask side");
     // quantity_precision is 0 — ticks are whole units, so no decimal point.
-    assert!(!liq.bid_ticks.contains('.'), "ticks must render as whole units");
+    assert!(!d.total_bid_ticks.contains('.'), "ticks must render as whole units");
 }
 
 #[tokio::test]
-async fn totals_on_an_empty_book_are_zeros_not_a_miss() {
+async fn depth_totals_on_an_empty_book_are_zeros() {
     let Some(pool) = setup().await else { return };
     seed_book(&pool, "empty", CHAIN_TIME).await;
 
-    let liq = liquidity(&pool, "empty").await.expect("an empty book is not an error");
-    assert_eq!(liq.bid_ticks, "0");
-    assert_eq!(liq.ask_ticks, "0");
-    assert_eq!(liq.bid_orders, 0);
-    assert_eq!(liq.ask_orders, 0);
-}
-
-#[tokio::test]
-async fn totals_carry_the_contract_version() {
-    let Some(pool) = setup().await else { return };
-    seed_book(&pool, "version", CHAIN_TIME).await;
-    sqlx::query("update inference_markets set version = '4.0.30' where orderbook_address = $1")
-        .bind(ob_of("version"))
-        .execute(&pool)
-        .await
-        .expect("stamp version");
-
-    let liq = liquidity(&pool, "version").await.expect("liquidity");
-    assert_eq!(
-        liq.contract_version.as_deref(),
-        Some("4.0.30"),
-        "same value depth reports for this book",
-    );
-}
-
-#[tokio::test]
-async fn totals_reject_an_unknown_book() {
-    let Some(pool) = setup().await else { return };
-    let repo = PostgresReadModelRepository::new(pool.clone());
-    let err = repo
-        .get_inference_liquidity("0:inf_liq_no_such_book", NOW)
-        .await
-        .expect_err("unknown book");
-    assert!(matches!(err.downcast_ref::<DomainError>(), Some(DomainError::InvalidMarketOrSymbol)));
+    let d = depth(&pool, "empty").await.expect("an empty book is not an error");
+    assert_eq!(d.total_bid_ticks, "0");
+    assert_eq!(d.total_ask_ticks, "0");
 }
 
 #[tokio::test]
@@ -402,7 +368,7 @@ async fn an_unreconciled_book_is_invisible_to_both_reads() {
 
     assert_listing(&pool, LiquidityFilter::Buy, &[], &["unreconciled"]).await;
 
-    let err = liquidity(&pool, "unreconciled").await.expect_err("not yet reconciled");
+    let err = depth(&pool, "unreconciled").await.expect_err("not yet reconciled");
     assert!(matches!(err.downcast_ref::<DomainError>(), Some(DomainError::InvalidMarketOrSymbol)));
 }
 
@@ -424,7 +390,7 @@ async fn null_quantity_precision_fails_closed() {
     .await
     .expect("clear quantity_precision");
 
-    let err = liquidity(&pool, "noscale").await.expect_err("must fail closed");
+    let err = depth(&pool, "noscale").await.expect_err("must fail closed");
     assert!(matches!(err.downcast_ref::<DomainError>(), Some(DomainError::MarketInconsistent)));
 
     sqlx::query("delete from inference_markets where orderbook_address = $1")
@@ -453,9 +419,8 @@ async fn a_past_deadline_order_is_not_liquidity() {
     assert_listing(&pool, LiquidityFilter::Buy, &[], &["stale"]).await;
 
     // ...and from the totals, which read the same book.
-    let liq = liquidity(&pool, "stale").await.expect("liquidity");
-    assert_eq!(liq.bid_ticks, "0", "a lapsed order is not resting ticks");
-    assert_eq!(liq.bid_orders, 0);
+    let d = depth(&pool, "stale").await.expect("depth");
+    assert_eq!(d.total_bid_ticks, "0", "a lapsed order is not resting ticks");
 }
 
 #[tokio::test]
@@ -469,8 +434,8 @@ async fn the_expiry_boundary_matches_the_contract() {
     open_order_until(&pool, "boundary_after", 1, true, "100", NOW + 1).await;
 
     assert_listing(&pool, LiquidityFilter::Buy, &["boundary_after"], &["boundary_at"]).await;
-    assert_eq!(liquidity(&pool, "boundary_at").await.expect("liquidity").bid_ticks, "0");
-    assert_eq!(liquidity(&pool, "boundary_after").await.expect("liquidity").bid_ticks, "100");
+    assert_eq!(depth(&pool, "boundary_at").await.expect("depth").total_bid_ticks, "0");
+    assert_eq!(depth(&pool, "boundary_after").await.expect("depth").total_bid_ticks, "100");
 }
 
 #[tokio::test]
@@ -481,7 +446,7 @@ async fn a_null_deadline_never_expires() {
     open_order(&pool, "gtc", 1, true, "100").await;
 
     assert_listing(&pool, LiquidityFilter::Buy, &["gtc"], &[]).await;
-    assert_eq!(liquidity(&pool, "gtc").await.expect("liquidity").bid_ticks, "100");
+    assert_eq!(depth(&pool, "gtc").await.expect("depth").total_bid_ticks, "100");
 }
 
 #[tokio::test]
@@ -498,15 +463,13 @@ async fn expiry_is_counted_per_side() {
     assert_listing(&pool, LiquidityFilter::Both, &[], &["half_stale"]).await;
     assert_listing(&pool, LiquidityFilter::Any, &["half_stale"], &[]).await;
 
-    let liq = liquidity(&pool, "half_stale").await.expect("liquidity");
-    assert_eq!(liq.bid_ticks, "0");
-    assert_eq!(liq.bid_orders, 0);
-    assert_eq!(liq.ask_ticks, "70");
-    assert_eq!(liq.ask_orders, 1);
+    let d = depth(&pool, "half_stale").await.expect("depth");
+    assert_eq!(d.total_bid_ticks, "0");
+    assert_eq!(d.total_ask_ticks, "70");
 }
 
 #[tokio::test]
-async fn depth_and_liquidity_agree_about_what_is_resting() {
+async fn depth_levels_add_up_to_the_depth_totals() {
     let Some(pool) = setup().await else { return };
     // The invariant the whole design rests on: one definition of resting,
     // three readers. Seed a book where every exclusion rule fires at once and
@@ -525,20 +488,37 @@ async fn depth_and_liquidity_agree_about_what_is_resting() {
     open_order_until(&pool, "agree", 8, false, "999", NOW - 1).await; // lapsed
     open_order_until(&pool, "agree", 9, false, "999", NOW).await; // lapsed at the boundary
 
-    let repo = PostgresReadModelRepository::new(pool.clone());
-    let depth = repo.get_inference_depth(&ob_of("agree"), 100, NOW).await.expect("depth");
+    let snap = depth(&pool, "agree").await.expect("depth");
     // Survivors on a side rest at the same price, so they collapse into one level.
     let sum = |levels: &[dodex_domain::PriceLevel]| -> u64 {
         levels.iter().map(|l| l.quantity.parse::<u64>().expect("integer ticks")).sum()
     };
-    assert_eq!(sum(&depth.bids), 150);
-    assert_eq!(sum(&depth.asks), 40);
+    assert_eq!(sum(&snap.bids), 150);
+    assert_eq!(sum(&snap.asks), 40);
 
-    let liq = liquidity(&pool, "agree").await.expect("liquidity");
-    assert_eq!(liq.bid_ticks, "150", "depth and totals must agree");
-    assert_eq!(liq.bid_orders, 2);
-    assert_eq!(liq.ask_ticks, "40", "depth and totals must agree");
-    assert_eq!(liq.ask_orders, 1);
+    // The totals come from a window over every price group, not from adding up
+    // the levels that were returned — so agreeing with them is a real check.
+    assert_eq!(snap.total_bid_ticks, "150");
+    assert_eq!(snap.total_ask_ticks, "40");
+}
+
+#[tokio::test]
+async fn depth_totals_are_not_capped_by_limit() {
+    let Some(pool) = setup().await else { return };
+    // The point of the totals: `limit` decides how many levels come back, and
+    // nothing else. Five distinct prices per side, asked for one level.
+    seed_book(&pool, "uncapped", CHAIN_TIME).await;
+    for i in 1..=5i64 {
+        seed_order_priced(&pool, "uncapped", i, true, "10", 1000 + i, None).await;
+        seed_order_priced(&pool, "uncapped", 100 + i, false, "20", 5000 + i, None).await;
+    }
+
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let snap = repo.get_inference_depth(&ob_of("uncapped"), 1, NOW).await.expect("depth");
+    assert_eq!(snap.bids.len(), 1, "limit caps the levels");
+    assert_eq!(snap.asks.len(), 1);
+    assert_eq!(snap.total_bid_ticks, "50", "but not the total: 5 levels x 10 ticks");
+    assert_eq!(snap.total_ask_ticks, "100", "5 levels x 20 ticks");
 }
 
 // ---------------------------------------------------------------------------

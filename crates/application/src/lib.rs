@@ -14,7 +14,6 @@ use dodex_domain::precision_within;
 use dodex_domain::DepthSnapshot;
 use dodex_domain::DomainError;
 use dodex_domain::InferenceDepthSnapshot;
-use dodex_domain::InferenceLiquidity;
 use dodex_domain::InferenceMarketsPage;
 use dodex_domain::LiquidityFilter;
 use dodex_domain::MarketAddress;
@@ -153,7 +152,7 @@ pub enum InferenceMarketsSort {
 pub struct InferenceMarketsListing {
     /// Keep only books that currently hold resting liquidity of the requested
     /// side. Backs `?liquidity=`. Existential — it says a side is quoted, not
-    /// how deep it is; totals live behind `/api/v1/inference/liquidity`.
+    /// how deep it is; the whole-book totals are on `/api/v1/inference/depth`.
     pub liquidity: Option<LiquidityFilter>,
     pub sort: InferenceMarketsSort,
     pub cursor: Option<String>,
@@ -801,17 +800,6 @@ pub trait InferenceReadRepository: Send + Sync {
         now: i64,
     ) -> Result<InferenceDepthSnapshot, anyhow::Error>;
 
-    /// Resting-liquidity totals for one book: ticks and order counts per side.
-    /// Resolution, error mapping and the `now` expiry cut-off mirror
-    /// [`get_inference_depth`](Self::get_inference_depth) — unknown /
-    /// unreconciled address → `InvalidMarketOrSymbol`, corrupt read-model data
-    /// → `MarketInconsistent`. An empty book is zero totals, not an error.
-    async fn get_inference_liquidity(
-        &self,
-        orderbook_address: &str,
-        now: i64,
-    ) -> Result<InferenceLiquidity, anyhow::Error>;
-
     /// List a book's orders. Unknown / unreconciled address → `InvalidMarketOrSymbol`.
     /// A book whose view the indexer cannot vouch for yields `MarketInconsistent` for
     /// queries that ask about a TokenContract among live SELLs — see the fail-closed gate
@@ -847,14 +835,6 @@ impl<T: ?Sized + InferenceReadRepository> InferenceReadRepository for Arc<T> {
         now: i64,
     ) -> Result<InferenceDepthSnapshot, anyhow::Error> {
         (**self).get_inference_depth(orderbook_address, limit, now).await
-    }
-
-    async fn get_inference_liquidity(
-        &self,
-        orderbook_address: &str,
-        now: i64,
-    ) -> Result<InferenceLiquidity, anyhow::Error> {
-        (**self).get_inference_liquidity(orderbook_address, now).await
     }
 
     async fn list_inference_orders(
@@ -1303,35 +1283,6 @@ where
         query: GetInferenceDepthQuery,
     ) -> Result<InferenceDepthSnapshot, anyhow::Error> {
         self.repo.get_inference_depth(&query.orderbook_address, query.limit, query.now).await
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct GetInferenceLiquidityQuery {
-    pub orderbook_address: String,
-    /// Request wall-clock, unix seconds; shared with the response `serverTime`.
-    pub now: i64,
-}
-
-pub struct GetInferenceLiquidityUseCase<R> {
-    repo: R,
-}
-
-impl<R> GetInferenceLiquidityUseCase<R> {
-    pub fn new(repo: R) -> Self {
-        Self { repo }
-    }
-}
-
-impl<R> GetInferenceLiquidityUseCase<R>
-where
-    R: InferenceReadRepository,
-{
-    pub async fn execute(
-        &self,
-        query: GetInferenceLiquidityQuery,
-    ) -> Result<InferenceLiquidity, anyhow::Error> {
-        self.repo.get_inference_liquidity(&query.orderbook_address, query.now).await
     }
 }
 
@@ -7309,7 +7260,6 @@ mod inference_usecase_tests {
 
     use async_trait::async_trait;
     use dodex_domain::InferenceDepthSnapshot;
-    use dodex_domain::InferenceLiquidity;
     use dodex_domain::InferenceMarketsPage;
 
     use super::DomainError;
@@ -7374,21 +7324,8 @@ mod inference_usecase_tests {
                 last_update_id: limit.to_string(),
                 bids: vec![],
                 asks: vec![],
-            })
-        }
-
-        async fn get_inference_liquidity(
-            &self,
-            orderbook_address: &str,
-            _now: i64,
-        ) -> Result<InferenceLiquidity, anyhow::Error> {
-            Ok(InferenceLiquidity {
-                orderbook_address: orderbook_address.to_string(),
-                contract_version: None,
-                bid_ticks: "0".to_string(),
-                ask_ticks: "0".to_string(),
-                bid_orders: 0,
-                ask_orders: 0,
+                total_bid_ticks: "0".to_string(),
+                total_ask_ticks: "0".to_string(),
             })
         }
 

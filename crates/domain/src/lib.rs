@@ -344,6 +344,13 @@ pub struct InferenceDepthSnapshot {
     pub last_update_id: String,
     pub bids: Vec<PriceLevel>,
     pub asks: Vec<PriceLevel>,
+    /// Ticks resting across the **whole** bid side, not just the levels in
+    /// `bids`. `limit` caps how many levels are returned; it does not cap this,
+    /// so the total is the same answer whatever page size was asked for.
+    /// `"0"` on an empty side. Scaled like a level's quantity.
+    pub total_bid_ticks: String,
+    /// The same across the whole ask side.
+    pub total_ask_ticks: String,
 }
 
 /// Resting-liquidity predicate for the `/api/v1/inference/markets`
@@ -382,26 +389,6 @@ impl LiquidityFilter {
             _ => None,
         }
     }
-}
-
-/// Resting-liquidity totals for one `InferenceOrderBook`, behind
-/// `/api/v1/inference/liquidity`. Tick counts are summed over the open orders
-/// of each side and rendered on the book's display grid — the same scaling a
-/// depth level's quantity gets, so the two are directly comparable.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InferenceLiquidity {
-    pub orderbook_address: String,
-    /// Version of the deployed order-book contract, mirroring
-    /// [`InferenceDepthSnapshot::contract_version`].
-    pub contract_version: Option<String>,
-    /// Total ticks resting on the bid side.
-    pub bid_ticks: String,
-    /// Total ticks resting on the ask side.
-    pub ask_ticks: String,
-    /// Number of open orders behind `bid_ticks`.
-    pub bid_orders: i64,
-    /// Number of open orders behind `ask_ticks`.
-    pub ask_orders: i64,
 }
 
 /// Seller rebate cap in bps (the contract's `REBATE_MAX_BPS`). Rendered as the

@@ -18,7 +18,6 @@ use dodex_application::InferenceSide;
 use dodex_domain::bps_to_decimal_string;
 use dodex_domain::DomainError;
 use dodex_domain::InferenceDepthSnapshot;
-use dodex_domain::InferenceLiquidity;
 use dodex_domain::InferenceMarket;
 use dodex_domain::InferenceMarketStatus;
 use dodex_domain::InferenceMarketsPage;
@@ -65,20 +64,10 @@ struct InferenceDepthLevelRow {
     is_buy: bool,
     price: String,
     quantity: String,
-}
-
-/// One book's resting-liquidity totals, straight out of the `get_inference_liquidity`
-/// aggregate. `bid_ticks` / `ask_ticks` are raw contract integers (summed
-/// `inference_orders.amount_remaining`); the scaling metadata rides along so
-/// the row renders on the book's display grid without a second query.
-#[derive(Debug, sqlx::FromRow)]
-struct InferenceLiquidityRow {
-    quantity_precision: Option<i32>,
-    contract_version: Option<String>,
-    bid_ticks: String,
-    ask_ticks: String,
-    bid_orders: i64,
-    ask_orders: i64,
+    /// Ticks across this row's whole side, repeated on every row of it. A
+    /// window over the grouped rows, so it is the total across all price
+    /// levels of the side and not just the ones `limit` lets through.
+    side_total: String,
 }
 
 // Column list shared by the listing and single-market queries. `created_at`
@@ -243,14 +232,6 @@ impl InferenceReadRepository for PostgresReadModelRepository {
         get_inference_depth_impl(self, orderbook_address, limit, now).await
     }
 
-    async fn get_inference_liquidity(
-        &self,
-        orderbook_address: &str,
-        now: i64,
-    ) -> Result<InferenceLiquidity, anyhow::Error> {
-        get_inference_liquidity_impl(self, orderbook_address, now).await
-    }
-
     async fn list_inference_orders(
         &self,
         query: &InferenceOrdersQuery,
@@ -383,9 +364,9 @@ fn assemble_inference_market(row: InferenceMarketRow) -> Result<InferenceMarket,
 /// Existential, never aggregate: the semi-join stops at the first matching
 /// row, so the filter costs one index probe per candidate book rather than a
 /// scan of its whole book. Summing here would make the listing's cost
-/// proportional to every open order on every visible book — which is why the
-/// totals are a separate, book-scoped query (`get_inference_liquidity_impl`)
-/// and why the listing response carries no tick counts.
+/// proportional to every open order on every visible book, which is why the
+/// listing carries no tick counts — `/api/v1/inference/depth` reports the
+/// whole-book totals for one book, where the scan is already being paid for.
 ///
 /// An `InferenceOrderBook` is one book per model, so — unlike the prediction
 /// side — there is no outcome dimension the probe has to quantify over: an
@@ -436,67 +417,6 @@ fn inference_liquidity_predicate(filter: Option<LiquidityFilter>) -> String {
     }
 }
 
-/// Resting-liquidity totals for one book: ticks and order counts per side.
-///
-/// Resolution mirrors `get_inference_depth_impl` exactly — the same visibility
-/// gate, the same `InvalidMarketOrSymbol` on a miss, the same
-/// `quantity_precision` scaling — so `bidTicks` is directly comparable with a
-/// depth level's quantity. One statement covers resolution and aggregation:
-/// the LEFT JOIN is what turns an empty book into zero totals instead of a
-/// missing row, preserving depth's empty-book contract.
-async fn get_inference_liquidity_impl(
-    repo: &PostgresReadModelRepository,
-    orderbook_address: &str,
-    now: i64,
-) -> Result<InferenceLiquidity, anyhow::Error> {
-    let row: Option<InferenceLiquidityRow> = sqlx::query_as(
-        r#"select im.quantity_precision                             as quantity_precision,
-                  im.version                                        as contract_version,
-                  coalesce(sum(io.amount_remaining)
-                           filter (where io.is_buy), 0)::text     as bid_ticks,
-                  coalesce(sum(io.amount_remaining)
-                           filter (where not io.is_buy), 0)::text as ask_ticks,
-                  -- `count(*)`, not `count(io.order_id)`: `order_id` is not in
-                  -- `inference_orders_liquidity_idx`, and naming it forces a heap
-                  -- fetch per order. The LEFT JOIN's null-extended row has a NULL
-                  -- `is_buy`, so neither filter counts it.
-                  count(*) filter (where io.is_buy)               as bid_orders,
-                  count(*) filter (where not io.is_buy)           as ask_orders
-             from inference_markets im
-             left join inference_orders io
-                    on io.orderbook_address = im.orderbook_address
-                   and io.status = 'OPEN'
-                   and io.amount_remaining > 0
-                   and (io.deadline is null or io.deadline > $2)
-            where im.orderbook_address = $1
-              and im.last_reconciled_at is not null
-            group by im.quantity_precision, im.version"#,
-    )
-    .bind(orderbook_address)
-    .bind(now)
-    .fetch_optional(repo.pool())
-    .await
-    .context("aggregate inference_orders for liquidity")?;
-
-    // No row ⇒ unknown book, or one still behind the visibility gate. Both are
-    // the client miss depth reports; a probe cannot tell them apart.
-    let Some(row) = row else {
-        return Err(anyhow!(DomainError::InvalidMarketOrSymbol));
-    };
-    // NULL precision on a reconciled row is corruption, not an empty book.
-    let quantity_scale =
-        inference_scale(row.quantity_precision, orderbook_address, "quantity_precision")?;
-
-    Ok(InferenceLiquidity {
-        orderbook_address: orderbook_address.to_string(),
-        contract_version: row.contract_version,
-        bid_ticks: scale_uint_to_decimal(&row.bid_ticks, quantity_scale),
-        ask_ticks: scale_uint_to_decimal(&row.ask_ticks, quantity_scale),
-        bid_orders: row.bid_orders,
-        ask_orders: row.ask_orders,
-    })
-}
-
 async fn get_inference_depth_impl(
     repo: &PostgresReadModelRepository,
     orderbook_address: &str,
@@ -522,15 +442,22 @@ async fn get_inference_depth_impl(
 
     let limit = limit.max(1) as i64;
     let rows: Vec<InferenceDepthLevelRow> = sqlx::query_as(
+        // `sum(sum(...)) over ()` is a window over the GROUPed rows. SQL
+        // evaluates windows after GROUP BY but before ORDER BY / LIMIT, so it
+        // totals every price level of the side even though only `$2` of them
+        // are returned — and it rides the scan the GROUP BY is already making,
+        // costing no second pass over the book.
         r#"(select true  as is_buy, price::text as price,
-                   sum(amount_remaining)::text as quantity
+                   sum(amount_remaining)::text as quantity,
+                   (sum(sum(amount_remaining)) over ())::text as side_total
               from inference_orders
              where orderbook_address = $1 and status = 'OPEN' and amount_remaining > 0
                and (deadline is null or deadline > $3) and is_buy
              group by price order by price desc limit $2)
            union all
            (select false as is_buy, price::text as price,
-                   sum(amount_remaining)::text as quantity
+                   sum(amount_remaining)::text as quantity,
+                   (sum(sum(amount_remaining)) over ())::text as side_total
               from inference_orders
              where orderbook_address = $1 and status = 'OPEN' and amount_remaining > 0
                and (deadline is null or deadline > $3) and not is_buy
@@ -547,7 +474,16 @@ async fn get_inference_depth_impl(
     // A non-numeric raw price is read-model corruption — fail closed.
     let mut bids: Vec<(BigUint, PriceLevel)> = Vec::new();
     let mut asks: Vec<(BigUint, PriceLevel)> = Vec::new();
+    // Every row of a side repeats that side's total; an empty side has no rows
+    // at all, which is a total of zero rather than a missing answer.
+    let mut total_bid_raw = String::from("0");
+    let mut total_ask_raw = String::from("0");
     for row in rows {
+        if row.is_buy {
+            total_bid_raw.clone_from(&row.side_total);
+        } else {
+            total_ask_raw.clone_from(&row.side_total);
+        }
         let key = BigUint::parse_bytes(row.price.as_bytes(), 10).ok_or_else(|| {
             warn!(orderbook = %orderbook_address, raw = %row.price, "inference_orders.price is not a non-negative integer");
             anyhow!(DomainError::MarketInconsistent)
@@ -581,6 +517,10 @@ async fn get_inference_depth_impl(
         last_update_id: last_update_id.unwrap_or_default(),
         bids,
         asks,
+        // Same scaling as a level's quantity, so a client can add the levels up
+        // and land on this number.
+        total_bid_ticks: scale_uint_to_decimal(&total_bid_raw, quantity_scale),
+        total_ask_ticks: scale_uint_to_decimal(&total_ask_raw, quantity_scale),
     })
 }
 

@@ -1,6 +1,6 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
-// HTTP integration tests for GET /api/v1/inference/liquidity and the
+// HTTP integration tests for the whole-book totals on GET /api/v1/inference/depth and the
 // `?liquidity=` filter on GET /api/v1/inference/markets, driven through the
 // production router. The repo-level semantics (which rows count, how ticks
 // scale) live in crates/infrastructure/tests/inference_liquidity.rs — what
@@ -17,22 +17,13 @@ use serde_json::Value;
 use sqlx::PgPool;
 
 #[derive(Debug, Deserialize)]
-struct LiquidityBody {
-    #[serde(rename = "serverTime")]
-    #[allow(dead_code)]
-    server_time: i64,
-    #[serde(rename = "inferenceOrderBookAddress")]
-    orderbook_address: String,
-    #[serde(rename = "contractVersion")]
-    contract_version: Option<String>,
-    #[serde(rename = "bidTicks")]
-    bid_ticks: String,
-    #[serde(rename = "askTicks")]
-    ask_ticks: String,
-    #[serde(rename = "bidOrders")]
-    bid_orders: i64,
-    #[serde(rename = "askOrders")]
-    ask_orders: i64,
+struct DepthBody {
+    #[serde(rename = "totalBidTicks")]
+    total_bid_ticks: String,
+    #[serde(rename = "totalAskTicks")]
+    total_ask_ticks: String,
+    bids: Vec<[String; 2]>,
+    asks: Vec<[String; 2]>,
 }
 
 async fn purge(pool: &PgPool, ob: &str) {
@@ -139,77 +130,73 @@ fn far_future() -> i64 {
 }
 
 #[tokio::test]
-async fn happy_path_returns_tick_totals_per_side() {
+async fn depth_reports_whole_book_totals() {
     let Some((service, pool, _kek, _pn)) = common::setup().await else { return };
     let ob = "0:inf_liq_http_happy";
     purge(&pool, ob).await;
     seed_market(&pool, ob, 1_700_000_000).await;
-    seed_order(&pool, ob, 1, true, "100").await;
-    seed_order(&pool, ob, 2, true, "50").await;
-    seed_order(&pool, ob, 3, false, "25").await;
+    // Two bids at distinct prices and one ask, so the totals are not simply the
+    // single level each side returns.
+    seed_order_priced(&pool, ob, 1, true, "100", 1200, None).await;
+    seed_order_priced(&pool, ob, 2, true, "50", 1100, None).await;
+    seed_order_priced(&pool, ob, 3, false, "25", 2000, None).await;
 
     // No auth headers: a public route must not be 401-gated.
     let mut resp = TestClient::get(format!(
-        "http://test/api/v1/inference/liquidity?inferenceOrderBookAddress={ob}"
+        "http://test/api/v1/inference/depth?inferenceOrderBookAddress={ob}"
     ))
     .send(&service)
     .await;
-    assert_eq!(resp.status_code, Some(StatusCode::OK), "public liquidity route returns 200");
-    let body: LiquidityBody = resp.take_json().await.expect("liquidity body");
-    assert_eq!(body.orderbook_address, ob, "address echoed from the request");
-    assert_eq!(body.contract_version.as_deref(), Some("4.0.30"));
-    assert_eq!(body.bid_ticks, "150");
-    assert_eq!(body.bid_orders, 2);
-    assert_eq!(body.ask_ticks, "25");
-    assert_eq!(body.ask_orders, 1);
+    assert_eq!(resp.status_code, Some(StatusCode::OK), "public depth route returns 200");
+    let body: DepthBody = resp.take_json().await.expect("depth body");
+    assert_eq!(body.bids.len(), 2);
+    assert_eq!(body.total_bid_ticks, "150");
+    assert_eq!(body.total_ask_ticks, "25");
 
     purge(&pool, ob).await;
 }
 
 #[tokio::test]
-async fn empty_book_returns_200_with_zero_totals() {
+async fn depth_totals_ignore_the_level_limit() {
+    let Some((service, pool, _kek, _pn)) = common::setup().await else { return };
+    let ob = "0:inf_liq_http_limit";
+    purge(&pool, ob).await;
+    seed_market(&pool, ob, 1_700_000_000).await;
+    seed_order_priced(&pool, ob, 1, true, "100", 1200, None).await;
+    seed_order_priced(&pool, ob, 2, true, "50", 1100, None).await;
+
+    let mut resp = TestClient::get(format!(
+        "http://test/api/v1/inference/depth?inferenceOrderBookAddress={ob}&limit=1"
+    ))
+    .send(&service)
+    .await;
+    assert_eq!(resp.status_code, Some(StatusCode::OK));
+    let body: DepthBody = resp.take_json().await.expect("depth body");
+    assert_eq!(body.bids.len(), 1, "limit caps the levels");
+    assert_eq!(body.total_bid_ticks, "150", "and nothing else");
+
+    purge(&pool, ob).await;
+}
+
+#[tokio::test]
+async fn depth_on_an_empty_book_totals_zero() {
     let Some((service, pool, _kek, _pn)) = common::setup().await else { return };
     let ob = "0:inf_liq_http_empty";
     purge(&pool, ob).await;
     seed_market(&pool, ob, 1_700_000_000).await;
 
     let mut resp = TestClient::get(format!(
-        "http://test/api/v1/inference/liquidity?inferenceOrderBookAddress={ob}"
+        "http://test/api/v1/inference/depth?inferenceOrderBookAddress={ob}"
     ))
     .send(&service)
     .await;
     assert_eq!(resp.status_code, Some(StatusCode::OK));
-    let body: LiquidityBody = resp.take_json().await.expect("liquidity body");
-    assert_eq!(body.bid_ticks, "0");
-    assert_eq!(body.ask_ticks, "0");
-    assert_eq!(body.bid_orders, 0);
-    assert_eq!(body.ask_orders, 0);
+    let body: DepthBody = resp.take_json().await.expect("depth body");
+    assert!(body.bids.is_empty() && body.asks.is_empty());
+    assert_eq!(body.total_bid_ticks, "0", "an empty side totals zero, it is not absent");
+    assert_eq!(body.total_ask_ticks, "0");
 
     purge(&pool, ob).await;
-}
-
-#[tokio::test]
-async fn missing_orderbook_address_is_1102() {
-    let Some((service, _pool, _kek, _pn)) = common::setup().await else { return };
-    // The aggregate is per-book by contract; without the address there is
-    // nothing to scope it to.
-    let mut resp = TestClient::get("http://test/api/v1/inference/liquidity").send(&service).await;
-    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
-    let body: Value = resp.take_json().await.expect("error body");
-    assert_eq!(body["code"], -1102);
-}
-
-#[tokio::test]
-async fn unknown_book_is_1121() {
-    let Some((service, _pool, _kek, _pn)) = common::setup().await else { return };
-    let mut resp = TestClient::get(
-        "http://test/api/v1/inference/liquidity?inferenceOrderBookAddress=0:inf_liq_http_nope",
-    )
-    .send(&service)
-    .await;
-    assert_eq!(resp.status_code, Some(StatusCode::NOT_FOUND));
-    let body: Value = resp.take_json().await.expect("error body");
-    assert_eq!(body["code"], -1121);
 }
 
 #[tokio::test]
@@ -301,15 +288,15 @@ async fn a_lapsed_order_is_absent_from_the_totals_and_the_filter() {
     seed_order_until(&pool, ob, 2, false, "70", Some(far_future())).await;
 
     let mut resp = TestClient::get(format!(
-        "http://test/api/v1/inference/liquidity?inferenceOrderBookAddress={ob}"
+        "http://test/api/v1/inference/depth?inferenceOrderBookAddress={ob}"
     ))
     .send(&service)
     .await;
     assert_eq!(resp.status_code, Some(StatusCode::OK));
-    let body: LiquidityBody = resp.take_json().await.expect("liquidity body");
-    assert_eq!(body.bid_ticks, "0", "a lapsed bid is not resting liquidity");
-    assert_eq!(body.bid_orders, 0);
-    assert_eq!(body.ask_ticks, "70");
+    let body: DepthBody = resp.take_json().await.expect("depth body");
+    assert_eq!(body.total_bid_ticks, "0", "a lapsed bid is not resting liquidity");
+    assert!(body.bids.is_empty());
+    assert_eq!(body.total_ask_ticks, "70");
 
     // The filter reads the same book: SELL matches, BUY does not.
     let listed = |side: &str| {

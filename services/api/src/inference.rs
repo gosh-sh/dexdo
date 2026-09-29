@@ -4,8 +4,6 @@
 
 use dodex_application::GetInferenceDepthQuery;
 use dodex_application::GetInferenceDepthUseCase;
-use dodex_application::GetInferenceLiquidityQuery;
-use dodex_application::GetInferenceLiquidityUseCase;
 use dodex_application::GetInferenceMarketsUseCase;
 use dodex_application::GetInferenceOrdersInput;
 use dodex_application::GetInferenceOrdersUseCase;
@@ -105,7 +103,7 @@ impl From<InferenceMarketStatus> for InferenceMarketStatusDto {
         ("inferenceOrderBookAddress" = Option<String>, Query, description = "Single-market lookup. Mutually exclusive with filters and pagination."),
         ("status" = Option<String>, Query, description = "Comma-separated statuses to include. Currently only TRADING."),
         ("sort" = Option<String>, Query, description = "Sort field. createdAt (default, DESC)."),
-        ("liquidity" = Option<dto::LiquidityFilter>, Query, description = "Return only books currently holding resting liquidity of this side. Totals: /api/v1/inference/liquidity."),
+        ("liquidity" = Option<dto::LiquidityFilter>, Query, description = "Return only books currently holding resting liquidity of this side. For volume, read the totals on /api/v1/inference/depth."),
         ("cursor" = Option<String>, Query, description = "Opaque pagination cursor from a previous call."),
         ("limit" = Option<i64>, Query, minimum = 1, maximum = 200, description = "Page size. Default 50, max 200; out-of-range values clamp."),
     ),
@@ -238,6 +236,12 @@ struct InferenceDepthResponse {
     bids: Vec<[String; 2]>,
     #[salvo(schema(schema_with = inference_depth_asks_schema))]
     asks: Vec<[String; 2]>,
+    /// Ticks resting across the whole bid side. `limit` caps the levels in
+    /// `bids`, never this — the total is the same answer at any page size.
+    /// `"0"` on an empty side.
+    total_bid_ticks: String,
+    /// The same across the whole ask side.
+    total_ask_ticks: String,
 }
 
 // `[String; 2]` derives as an unbounded array; pin the [price, quantity] shape.
@@ -310,79 +314,8 @@ pub(crate) async fn get_inference_depth(
         last_update_id: snapshot.last_update_id,
         bids: snapshot.bids.into_iter().map(|l| [l.price, l.quantity]).collect(),
         asks: snapshot.asks.into_iter().map(|l| [l.price, l.quantity]).collect(),
-    }))
-}
-
-#[derive(Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
-struct InferenceLiquidityResponse {
-    /// Unix seconds, captured once for the request.
-    server_time: i64,
-    #[serde(rename = "inferenceOrderBookAddress")]
-    orderbook_address: String,
-    /// Version of the deployed order-book contract for this book; `null` when
-    /// not yet known on chain.
-    contract_version: Option<String>,
-    /// Total ticks resting on the bid side, summed over every open buy order.
-    /// Same scale as a `/api/v1/inference/depth` level's tick count.
-    bid_ticks: String,
-    /// Total ticks resting on the ask side.
-    ask_ticks: String,
-    /// Number of open orders behind `bidTicks`.
-    bid_orders: i64,
-    /// Number of open orders behind `askTicks`.
-    ask_orders: i64,
-}
-
-/// Resting-liquidity totals for one model's book.
-#[endpoint(
-    tags("inference-market-data"),
-    summary = "Inference order book liquidity",
-    parameters(
-        ("inferenceOrderBookAddress" = String, Query, description = "The model's order-book address."),
-    ),
-    security(()),
-)]
-pub(crate) async fn get_inference_liquidity(
-    req: &mut Request,
-    depot: &mut Depot,
-) -> Result<Json<InferenceLiquidityResponse>, ApiError> {
-    let state = depot
-        .obtain::<AppState>()
-        .map_err(|err| {
-            error!(?err, "missing AppState in depot");
-            ApiError::from(DomainError::Unexpected)
-        })?
-        .clone();
-    let inference_repo = state.inference_repo.clone().ok_or_else(|| {
-        error!("inference_repo not wired in AppState");
-        ApiError::from(DomainError::Unexpected)
-    })?;
-
-    // Book-scoped by contract: the response aggregates a whole book, so an
-    // all-books mode would let one unauthenticated request sum every open
-    // order on the exchange. Clients screen with
-    // `/api/v1/inference/markets?liquidity=`, then read totals per book.
-    let address = non_empty_query(req, "inferenceOrderBookAddress")
-        .ok_or(ApiError::from(DomainError::MissingParameter))?;
-
-    // One clock for both: the totals must not be cut at a different instant
-    // from the one the response reports.
-    let now = now_seconds();
-    let use_case = GetInferenceLiquidityUseCase::new(inference_repo);
-    let liquidity = use_case
-        .execute(GetInferenceLiquidityQuery { orderbook_address: address, now })
-        .await
-        .map_err(|err| map_domain_or_unexpected(err, "get_inference_liquidity"))?;
-
-    Ok(Json(InferenceLiquidityResponse {
-        server_time: now,
-        orderbook_address: liquidity.orderbook_address,
-        contract_version: liquidity.contract_version,
-        bid_ticks: liquidity.bid_ticks,
-        ask_ticks: liquidity.ask_ticks,
-        bid_orders: liquidity.bid_orders,
-        ask_orders: liquidity.ask_orders,
+        total_bid_ticks: snapshot.total_bid_ticks,
+        total_ask_ticks: snapshot.total_ask_ticks,
     }))
 }
 

@@ -29,7 +29,6 @@
     - [Inference Markets](#inference-markets)
       - [Liquidity filter](#liquidity-filter)
     - [Inference Depth](#inference-depth)
-    - [Inference Liquidity](#inference-liquidity)
     - [Inference Orders](#inference-orders)
       - [Lapsed orders](#lapsed-orders)
     - [Inference Trades](#inference-trades)
@@ -227,7 +226,6 @@ envelope field failed or why a credential was rejected.
 | Fetch recent prediction trades | `GET` | `/api/v1/prediction/trades` | `NONE` |
 | List inference markets (tradable models) | `GET` | `/api/v1/inference/markets` | `NONE` |
 | Fetch inference order book (depth) | `GET` | `/api/v1/inference/depth` | `NONE` |
-| Fetch inference order book liquidity | `GET` | `/api/v1/inference/liquidity` | `NONE` |
 | List inference orders | `GET` | `/api/v1/inference/orders` | `NONE` |
 | Fetch recent inference trades | `GET` | `/api/v1/inference/trades` | `NONE` |
 | Register a trading account from a PrivateNote | `POST` | `/api/v1/accounts` | `NONE` |
@@ -825,7 +823,7 @@ Response fields:
 
 Market data for the **private-inference market**: tradable AI models and the prediction markets settled from their prices. The unit of trade is an **inference tick** — one unit of model generation — priced **per tick in `SHELL`**. Each model has exactly one order book; there is no `symbol` dimension (unlike prediction-market depth, which is per outcome).
 
-All five endpoints are public (`NONE`), read-only, and eventually consistent — a just-placed order or a fresh reference price may briefly lag the chain.
+All four endpoints are public (`NONE`), read-only, and eventually consistent — a just-placed order or a fresh reference price may briefly lag the chain.
 
 ### Inference Markets
 
@@ -835,7 +833,7 @@ GET /api/v1/inference/markets
 
 List the tradable models — one entry per model order book.
 
-`bestBid` / `bestAsk` carry each book's top of book, so screening many books does not need one [`/api/v1/inference/depth`](#inference-depth) call each. They obey the same definition of resting as depth: an order that is in the book but past its `deadline` sets no quote (see [Lapsed orders](#lapsed-orders)). For the volume behind the quote, not just its price, use [`/api/v1/inference/liquidity`](#inference-liquidity).
+`bestBid` / `bestAsk` carry each book's top of book, so screening many books does not need one [`/api/v1/inference/depth`](#inference-depth) call each. They obey the same definition of resting as depth: an order that is in the book but past its `deadline` sets no quote (see [Lapsed orders](#lapsed-orders)). For the volume behind the quote, not just its price, read `totalBidTicks` / `totalAskTicks` from [`/api/v1/inference/depth`](#inference-depth).
 
 Query parameters:
 
@@ -924,7 +922,7 @@ Errors:
 
 Each model has exactly one order book, so the question is simply whether that book quotes the side — there is no outcome dimension the way there is on a prediction market.
 
-The filter answers "is this side quoted", not "how much is quoted": the response carries no tick counts. For totals, call [`/api/v1/inference/liquidity`](#inference-liquidity) on a book.
+The filter answers "is this side quoted", not "how much is quoted": the response carries no tick counts. For volume, read `totalBidTicks` / `totalAskTicks` from [`/api/v1/inference/depth`](#inference-depth) on a book.
 
 Any other value is rejected with `-1130 / 400`. Like the other listing parameters, `liquidity` MUST NOT be combined with `inferenceOrderBookAddress` (`-1102 / 400`) — presence alone conflicts, so even an empty `&liquidity=` is refused.
 
@@ -957,7 +955,9 @@ Response:
   "asks": [
     ["1050", "80"],
     ["1060", "210"]
-  ]
+  ],
+  "totalBidTicks": "420",
+  "totalAskTicks": "290"
 }
 ```
 
@@ -969,6 +969,8 @@ Orders whose `deadline` has passed are **not** included: the book skips such a m
 | --- | --- | --- |
 | `contractVersion` | STRING \| null | Version of the deployed order-book contract for this book (e.g. `"4.0.30"`). Same value as `contractVersion` in [`/api/v1/inference/markets`](#inference-markets) for the same `inferenceOrderBookAddress`. `null` when the contract version is not yet known on chain. |
 | `lastUpdateId` | STRING | Opaque chain-order cursor for this book. Lex-comparable: a larger string means a newer event has touched the book. Empty string when no order has landed yet. Do not parse it as an integer. |
+| `totalBidTicks` | DECIMAL | Ticks resting across the **whole** bid side, not only the levels in `bids`. `limit` caps how many levels come back; it does not cap this, so the total is the same answer at any page size. `"0"` on an empty side. |
+| `totalAskTicks` | DECIMAL | The same across the whole ask side. |
 
 Errors:
 
@@ -980,58 +982,6 @@ Errors:
 | Book data temporarily inconsistent | `-1500` | 503 |
 
 > **Prediction markets settled from a model price** are regular prediction markets, listed by [`/api/v1/prediction/markets`](#prediction-markets) — filter with `?resolvesFrom=<inferenceOrderBookAddress>` and read the per-market `resolvesFrom` block. See [Markets](#prediction-markets).
-
-### Inference Liquidity
-
-```http
-GET /api/v1/inference/liquidity
-```
-
-Fetch how many ticks are resting on one model's book, summed per side. This is the aggregate companion to [`/api/v1/inference/depth`](#inference-depth): depth lists the individual price levels, liquidity collapses the whole book into four numbers. The same orders are counted — open, with ticks remaining.
-
-The endpoint is scoped to one book by design; there is no all-books mode. Screen with [`/api/v1/inference/markets?liquidity=`](#liquidity-filter) first, then read totals for the books you kept.
-
-Query parameters:
-
-| Name | Type | Mandatory | Description |
-| --- | --- | --- | --- |
-| `inferenceOrderBookAddress` | STRING | YES | The model's order-book address from [`/api/v1/inference/markets`](#inference-markets). |
-
-Response:
-
-```json
-{
-  "serverTime": 1710000000,
-  "inferenceOrderBookAddress": "0:ob-addr...",
-  "contractVersion": "4.0.30",
-  "bidTicks": "420",
-  "askTicks": "290",
-  "bidOrders": 2,
-  "askOrders": 1
-}
-```
-
-| Field | Type | Description |
-| --- | --- | --- |
-| `serverTime` | LONG | Unix seconds, captured once for the request. |
-| `inferenceOrderBookAddress` | STRING | The book's address, echoed from the request. |
-| `contractVersion` | STRING \| null | Version of the deployed order-book contract. Same value [`/api/v1/inference/depth`](#inference-depth) reports for this book; `null` when not yet known on chain. |
-| `bidTicks` | DECIMAL | Total ticks resting on the bid side, summed over all open buy orders. Scaled by the book's `quantityPrecision` — the same units as a depth level's tick count. |
-| `askTicks` | DECIMAL | Same for the ask side. |
-| `bidOrders` | INT | Number of open orders behind `bidTicks`. |
-| `askOrders` | INT | Number of open orders behind `askTicks`. |
-
-Subscriptions are ordinary orders here: depth counts them, so these totals count them. Orders whose `deadline` has passed are excluded, for the same reason depth excludes them — see [Lapsed orders](#lapsed-orders).
-
-Errors:
-
-| Condition | Code | HTTP |
-| --- | --- | --- |
-| `inferenceOrderBookAddress` missing or blank | `-1102` | 400 |
-| `inferenceOrderBookAddress` not found / not yet available | `-1121` | 404 |
-| Book data temporarily inconsistent | `-1500` | 503 |
-
-A book with nothing resting returns `200` with `"0"` totals and zero counts — the same empty-book contract as depth, not a `404`.
 
 ### Inference Orders
 
@@ -1072,7 +1022,7 @@ By default it is `false`, hiding those rows. `includeExpired=true` returns them.
 - A row returned under `includeExpired=true` still reports `"status": "LIVE"`, because it is still in the book. Compare its `deadline` against `serverTime` to see that it has lapsed.
 - A `tokenContract` query ignores the filter and always returns a lapsed row. It asks whether the TokenContract is in use, and a lapsed SELL still holds it: the TokenContract cannot post a new offer or close until the order leaves the book. Its seller can release it by cancelling the order, and anyone can by passing its `orderId` to `expireOrder`.
 
-[`/api/v1/inference/depth`](#inference-depth), [`/api/v1/inference/liquidity`](#inference-liquidity) and the [`?liquidity=` filter](#liquidity-filter) apply the same deadline rule with no opt-out: those describe what can be traded against, and a lapsed order cannot.
+[`/api/v1/inference/depth`](#inference-depth) and the [`?liquidity=` filter](#liquidity-filter) apply the same deadline rule with no opt-out: those describe what can be traded against, and a lapsed order cannot.
 
 Response:
 
@@ -1145,7 +1095,7 @@ Notes:
 - `status=LIVE` can transiently include an order that was placed but never rested — a `POST_ONLY` placement rejected for crossing, a failed `FOK`, or a partially matched BUY `MARKET`/`IOC` whose remainder was refunded on chain without an order-bearing event. The reconciler's probe clears these on its next sweep. The error runs in the safe direction: such a row reports its TokenContract as *in use*, never as free.
 - `lastUpdateId` orders chain progress only. The reconciler mutates rows without advancing it, so two responses sharing a `lastUpdateId` are not guaranteed identical.
 - A `tokenContract` query that scopes live SELLs returns `-1500` (HTTP 503) while the book holds a live SELL whose TokenContract the indexer does not know. Deliberate: an empty page would otherwise be indistinguishable from "not in use", and 503 tells the client to retry where 404 would tell it to stop.
-- `deadline: null` means the indexer knows of no deadline. On a book at contract 4.0.31 or later that is a BUY placed with `deadline == 0` — good-till-cancel; every SELL offer there carries a deadline. A book's version is the `contractVersion` that [`/api/v1/inference/markets`](#inference-markets), [`/api/v1/inference/depth`](#inference-depth) and [`/api/v1/inference/liquidity`](#inference-liquidity) report. A book at 4.0.30 or earlier adds two more sources: a SELL, which then carried no deadline and never lapsed, and a row from the retired subscription order type, whose deadline the chain held but the `InferenceSubscriptionPlaced` event never published — such a row is born `null` and gains a value only when the sweep probes it. Likewise `createdAt` / `updatedAt` may be `null`.
+- `deadline: null` means the indexer knows of no deadline. On a book at contract 4.0.31 or later that is a BUY placed with `deadline == 0` — good-till-cancel; every SELL offer there carries a deadline. A book's version is the `contractVersion` that [`/api/v1/inference/markets`](#inference-markets) and [`/api/v1/inference/depth`](#inference-depth) report. A book at 4.0.30 or earlier adds two more sources: a SELL, which then carried no deadline and never lapsed, and a row from the retired subscription order type, whose deadline the chain held but the `InferenceSubscriptionPlaced` event never published — such a row is born `null` and gains a value only when the sweep probes it. Likewise `createdAt` / `updatedAt` may be `null`.
 - `ticks` is the **resting remainder**; `ticksInitial` is the placed size. `InferenceOrderPlaced.ticks` on chain is the initial size, so the same field name carries different numbers in the event and in this response. The `ticks` name follows [`/api/v1/inference/depth`](#inference-depth), which already publishes `[pricePerTick, ticks]` for the ticks resting at a level — a client comparing an order against a depth level finds one name for one quantity.
 - `deadline` is a **decimal string** while `createdAt`, `updatedAt`, and `serverTime` are JSON numbers, though all four are unix seconds. `deadline` is a chain `uint64` reproduced verbatim, and can exceed both `i64` and JSON's exact-integer range; the other three are database timestamps. This follows the repo-wide rule that chain-native unsigned integers (`price`, `ticks`, `lastUpdateId`) serialize as strings.
 - `note` and `tokenContract` cannot be combined: `-1130`, HTTP 400. Both are present, so nothing is missing — the combination is what cannot be served, because no index pins both and the pair would scan one filter's whole history. This is a different relation from [`/api/v1/prediction/orders`](#orders), where `predictionMarketAddress` and `symbol` must be given together or not at all, and a half-specified pair is `-1102`.
