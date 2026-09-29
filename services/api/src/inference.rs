@@ -183,8 +183,10 @@ fn build_inference_markets_request(
         Some(_) => return Err(ApiError::from(DomainError::InvalidParameter)),
     };
     // Unlike `status`, this one is a real predicate: an unknown token is -1130
-    // rather than a silently ignored no-op.
-    let liquidity = non_empty_query(req, "liquidity")
+    // rather than a silently ignored no-op. A blank value is -1102, not "no
+    // filter": an unbound `?liquidity=${side}` would otherwise return every
+    // book, dry ones included, as if they were quoted.
+    let liquidity = non_blank_query(req, "liquidity")?
         .as_deref()
         .map(|v| LiquidityFilter::parse(v).ok_or(ApiError::from(DomainError::InvalidParameter)))
         .transpose()?;

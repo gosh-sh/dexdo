@@ -461,7 +461,7 @@ The predicate is an `EXISTS` semi-join on `inference_orders.orderbook_address`, 
 - **Existential, never aggregate.** The semi-join stops at the first matching row, so the filter costs one index probe per candidate book instead of a scan of its book. Summing here would make the listing's cost proportional to every open order on every visible book — which is why the listing carries no tick counts — [`/api/v1/inference/depth`](#apiv1inferencedepth) reports the whole-book totals for one book, where that scan is already being paid for.
 - **No outcome dimension.** An `InferenceOrderBook` is one book per model, so `orderbook_address` plus a side is the whole key — exactly the leading edge of `inference_orders_liquidity_idx` (migration 0006). The prediction side needs an extra rule here (a market matches when *any* outcome quotes the side); the inference side does not.
 
-The side is an allow-listed enum (`LiquidityFilter::parse`) rendered as a literal SQL fragment; it consumes no bind parameter, so the listing's fixed `$1..$3` numbering is untouched. An unparseable value is `InvalidParameter` → 400. Unlike `status` — validated but not a predicate, since every visible row is `TRADING` — this one actually filters.
+The side is an allow-listed enum (`LiquidityFilter::parse`) rendered as a literal SQL fragment; it consumes no bind parameter, so the listing's fixed `$1..$3` numbering is untouched. It is read through `non_blank_query`, so a present-but-blank value is `MissingParameter` → 400 rather than "no filter" — an unbound template variable would otherwise list every book, dry ones included. An unparseable value is `InvalidParameter` → 400. Unlike `status` — validated but not a predicate, since every visible row is `TRADING` — this one actually filters.
 
 Index backing is `inference_orders_liquidity_idx` (migration 0006): `(orderbook_address, is_buy) INCLUDE (amount_remaining, deadline)` under the partial predicate `status = 'OPEN' AND amount_remaining > 0`. The filter uses exactly that predicate, so the correlated per-book probe is an index-only scan with the deadline test applied to the index tuple. `deadline` is payload and not predicate because the comparison is against the request clock, which no index predicate may reference. `inference_orders_open_book_idx` leads with the same two columns but carries neither the `amount_remaining > 0` predicate nor either value, so every candidate row would cost a heap fetch.
 
@@ -479,6 +479,7 @@ Same cursor machinery as `/api/v1/prediction/markets` (URL-safe base64 of `"<sor
 | --- | --- | --- |
 | `inferenceOrderBookAddress` unknown / not yet reconciled | `InvalidMarketOrSymbol` | 404 |
 | Invalid `status` / `sort` / `liquidity` enum value | `InvalidParameter` | 400 |
+| `liquidity` present but blank | `MissingParameter` | 400 |
 | `inferenceOrderBookAddress` together with list filters | `MissingParameter` | 400 |
 | Corrupted cursor | `InvalidParameter` | 400 |
 

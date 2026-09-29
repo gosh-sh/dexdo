@@ -906,6 +906,7 @@ Errors:
 | --- | --- | --- |
 | `inferenceOrderBookAddress` together with filter/pagination params | `-1102` | 400 |
 | Invalid `status` / `sort` / `liquidity` value | `-1130` | 400 |
+| `liquidity` present but blank | `-1102` | 400 |
 | Corrupted `cursor` | `-1130` | 400 |
 | `inferenceOrderBookAddress` not found | `-1121` | 404 |
 
@@ -924,7 +925,7 @@ Each model has exactly one order book, so the question is simply whether that bo
 
 The filter answers "is this side quoted", not "how much is quoted": the response carries no tick counts. For volume, read `totalBidTicks` / `totalAskTicks` from [`/api/v1/inference/depth`](#inference-depth) on a book.
 
-Any other value is rejected with `-1130 / 400`. Like the other listing parameters, `liquidity` MUST NOT be combined with `inferenceOrderBookAddress` (`-1102 / 400`) — presence alone conflicts, so even an empty `&liquidity=` is refused.
+Any other value is rejected with `-1130 / 400`, and a blank one with `-1102 / 400` — an unbound template variable must not silently drop the filter and list every book. Like the other listing parameters, `liquidity` MUST NOT be combined with `inferenceOrderBookAddress` (`-1102 / 400`) — presence alone conflicts, so even an empty `&liquidity=` is refused.
 
 ### Inference Depth
 

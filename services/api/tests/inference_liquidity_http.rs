@@ -252,6 +252,19 @@ async fn markets_rejects_an_unknown_liquidity_value() {
 }
 
 #[tokio::test]
+async fn a_blank_liquidity_is_1102() {
+    let Some((service, _pool, _kek, _pn)) = common::setup().await else { return };
+    // An unbound template variable must not quietly drop the filter: that
+    // would list every book, including ones that quote nothing.
+    let mut resp = TestClient::get("http://test/api/v1/inference/markets?liquidity=")
+        .send(&service)
+        .await;
+    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+    let body: Value = resp.take_json().await.expect("error body");
+    assert_eq!(body["code"], -1102);
+}
+
+#[tokio::test]
 async fn markets_rejects_liquidity_with_single_book_lookup() {
     let Some((service, _pool, _kek, _pn)) = common::setup().await else { return };
     // Single-book mode is mutually exclusive with every filter; `liquidity`
