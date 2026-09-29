@@ -321,6 +321,11 @@ pub struct InferenceMarket {
     /// Top of book on the ask side: the lowest matchable ask. `None` when no
     /// ask is matchable.
     pub best_ask: Option<String>,
+    /// Ticks resting across the whole ask side, scaled by `quantity_precision`
+    /// — the same figure `/api/v1/inference/depth` reports as
+    /// `total_ask_ticks`. `"0"` when no ask is matchable. There is no bid-side
+    /// counterpart on the market.
+    pub total_ask_ticks: String,
     pub created_at: i64,
 }
 

@@ -152,7 +152,8 @@ pub enum InferenceMarketsSort {
 pub struct InferenceMarketsListing {
     /// Keep only books that currently hold resting liquidity of the requested
     /// side. Backs `?liquidity=`. Existential — it says a side is quoted, not
-    /// how deep it is; the whole-book totals are on `/api/v1/inference/depth`.
+    /// how deep it is. Each returned market carries its ask-side total; the bid-side
+    /// total is only on `/api/v1/inference/depth`.
     pub liquidity: Option<LiquidityFilter>,
     pub sort: InferenceMarketsSort,
     pub cursor: Option<String>,

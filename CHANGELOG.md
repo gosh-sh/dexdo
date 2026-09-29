@@ -2,6 +2,16 @@
 
 All notable changes to DEX.DO are recorded here. Entries are date-based, newest first.
 
+## [2026-09-29]
+
+### Added
+
+- **`totalAskTicks` on every inference market.** `GET /api/v1/inference/markets` now carries each book's ask-side volume — the ticks resting across the whole ask side, identical to `totalAskTicks` on `/api/v1/inference/depth` for that book. `"0"` when nothing is matchable on the ask side, never `null`. Lapsed, closed and exhausted asks do not count; subscriptions do, as on depth. There is no bid-side total on the market — read `totalBidTicks` from depth for that.
+
+### Changed
+
+- **The inference market listing joins after it picks its page.** The top-of-book and ask-volume lookups now run only for the markets returned, not for every visible book. Same results, same order and cursors.
+
 ## [2026-09-28]
 
 ### Added

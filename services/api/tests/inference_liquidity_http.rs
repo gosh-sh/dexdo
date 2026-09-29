@@ -430,6 +430,7 @@ async fn markets_carry_the_top_of_book() {
     // price_precision 9 on this fixture, so raw 1200 renders as 0.000001200.
     assert_eq!(m["bestBid"], "0.000001200", "the lapsed 9999 bid must not set the quote");
     assert_eq!(m["bestAsk"], "0.000002000");
+    assert_eq!(m["totalAskTicks"], "100", "one live 100-tick ask; the bids are not counted");
 
     purge(&pool, ob).await;
 }
@@ -451,6 +452,7 @@ async fn a_dry_book_quotes_neither_side() {
     let m = &body["markets"][0];
     assert!(m["bestBid"].is_null(), "an empty side is null, not absent or zero");
     assert!(m["bestAsk"].is_null());
+    assert_eq!(m["totalAskTicks"], "0", "an empty ask side totals zero, not null");
 
     purge(&pool, ob).await;
 }

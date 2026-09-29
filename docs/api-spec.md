@@ -833,7 +833,7 @@ GET /api/v1/inference/markets
 
 List the tradable models — one entry per model order book.
 
-`bestBid` / `bestAsk` carry each book's top of book, so screening many books does not need one [`/api/v1/inference/depth`](#inference-depth) call each. They obey the same definition of resting as depth: an order that is in the book but past its `deadline` sets no quote (see [Lapsed orders](#lapsed-orders)). For the volume behind the quote, not just its price, read `totalBidTicks` / `totalAskTicks` from [`/api/v1/inference/depth`](#inference-depth).
+`bestBid` / `bestAsk` carry each book's top of book, so screening many books does not need one [`/api/v1/inference/depth`](#inference-depth) call each. They obey the same definition of resting as depth: an order that is in the book but past its `deadline` sets no quote (see [Lapsed orders](#lapsed-orders)). `totalAskTicks` carries the ask-side volume the same way — the ticks resting across the whole ask side, identical to `totalAskTicks` on depth. There is no bid-side total on the market; for it, read `totalBidTicks` from [`/api/v1/inference/depth`](#inference-depth).
 
 Query parameters:
 
@@ -870,6 +870,7 @@ Response:
       "referencePrice": "1010",
       "bestBid": "0.000001200",
       "bestAsk": "0.000001800",
+      "totalAskTicks": "290",
       "createdAt": 1709980000
     }
   ]
@@ -898,6 +899,7 @@ Response fields:
 | `referencePrice` | DECIMAL \| null | Weekly-median price per tick used to settle prediction markets. **`null`** when the book has no recent liquidity. |
 | `bestBid` | DECIMAL \| null | Top of book: the highest price a matchable bid rests at, scaled by `pricePrecision`. Identical to the first `bids` level [`/api/v1/inference/depth`](#inference-depth) would return for this book. **`null`** when no bid is matchable — an empty side, not a zero. |
 | `bestAsk` | DECIMAL \| null | The lowest price a matchable ask rests at; **`null`** when no ask is matchable. |
+| `totalAskTicks` | DECIMAL | Ticks resting across the whole ask side, scaled by `quantityPrecision`. Identical to `totalAskTicks` on [`/api/v1/inference/depth`](#inference-depth) for this book. **`"0"`** when no ask is matchable. |
 | `createdAt` | LONG | Unix seconds. When the book was first seen. |
 
 Errors:
@@ -923,7 +925,7 @@ Errors:
 
 Each model has exactly one order book, so the question is simply whether that book quotes the side — there is no outcome dimension the way there is on a prediction market.
 
-The filter answers "is this side quoted", not "how much is quoted": the response carries no tick counts. For volume, read `totalBidTicks` / `totalAskTicks` from [`/api/v1/inference/depth`](#inference-depth) on a book.
+The filter answers "is this side quoted", not "how much is quoted". Each market carries its ask-side volume as `totalAskTicks`; for the bid side, read `totalBidTicks` from [`/api/v1/inference/depth`](#inference-depth) on a book.
 
 Any other value is rejected with `-1130 / 400`, and a blank one with `-1102 / 400` — an unbound template variable must not silently drop the filter and list every book. Like the other listing parameters, `liquidity` MUST NOT be combined with `inferenceOrderBookAddress` (`-1102 / 400`) — presence alone conflicts, so even an empty `&liquidity=` is refused.
 

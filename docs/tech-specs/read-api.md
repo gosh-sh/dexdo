@@ -22,7 +22,7 @@ Implementation-facing requirements for the HTTP layer that serves the market-dat
 
 **Depth** — the `/api/v1/prediction/depth` response for one market outcome: sorted bid and ask price levels plus `lastUpdateId`. It is built from `live_orders`, not by querying the OrderBook contract during the HTTP request.
 
-**Resting liquidity** — orders currently on a book AND still matchable: rows with `status = 'OPEN' AND amount_remaining > 0 AND (deadline IS NULL OR deadline > now)`. On the inference side three readers share this one definition — [depth](#apiv1inferencedepth) (its levels and its whole-book totals alike), the [`?liquidity=` listing filter](#resting-liquidity-filter-liquidity) and the per-market [top of book](#top-of-book-bestbid--bestask) — so they cannot disagree about what is on the book. The default LIVE view of [`/api/v1/inference/orders`](#apiv1inferenceorders) applies the deadline half of it, except to a `tokenContract` lookup (see [§ includeExpired](#includeexpired)).
+**Resting liquidity** — orders currently on a book AND still matchable: rows with `status = 'OPEN' AND amount_remaining > 0 AND (deadline IS NULL OR deadline > now)`. On the inference side three readers share this one definition — [depth](#apiv1inferencedepth) (its levels and its whole-book totals alike), the [`?liquidity=` listing filter](#resting-liquidity-filter-liquidity), the per-market [top of book](#top-of-book-bestbid--bestask) and the per-market [ask volume](#ask-volume-totalaskticks) — so they cannot disagree about what is on the book. The default LIVE view of [`/api/v1/inference/orders`](#apiv1inferenceorders) applies the deadline half of it, except to a `tokenContract` lookup (see [§ includeExpired](#includeexpired)).
 
 **Lapsed order** — a row that is still in the book (stored `OPEN`) but whose `deadline` has passed. The book will not settle against it (`_isExpired` in `InferenceOrderBook.sol`: `deadline != 0 && block.timestamp >= deadline`), but it leaves the book only when a taker's match reaches it, someone calls the permissionless `expireOrder`, or its owner cancels it; until the indexer projects the event that follows, the row stays `OPEN`. Orthogonal to the public `EXPIRED` status, which only the event sets — see [§ Lapsed vs EXPIRED](#lapsed-vs-expired).
 
@@ -446,11 +446,28 @@ Per row: render `modelRefName` from `model_ref`, falling back to `model_hash` wh
 
 Each market row carries the best matchable quote on each side, built by two `LEFT JOIN LATERAL` sub-selects — `ORDER BY price DESC LIMIT 1` for the bid, `ASC` for the ask — over the same [resting](#glossary) predicate depth aggregates. `bestBid` is therefore exactly depth's first `bids` level, digit for digit: same filter, same `price_precision` scaling. An empty side yields no lateral row and renders `null`, never `"0"`.
 
-LATERAL rather than a second round trip: the join runs once per market row the SELECT produces, and the listing has already bounded that by `LIMIT`, so the cost is two index probes per *returned* market — never two per visible book. Measured on 1M orders across 200 books: **+2.0 ms on a 50-row page, +2.7 ms on a 200-row page**, roughly doubling a listing that costs 3–5 ms.
+LATERAL rather than a second round trip: the join runs once per market row it is joined to, and the listing picks its page in a subquery before joining (see [Ask volume](#ask-volume-totalaskticks)), so the cost is two index probes per *returned* market — never two per visible book.
 
 The probe stops at the first index entry only while the top of book is live. `deadline` is not a prefix of the index key, so a wall of lapsed orders priced above the best live quote is walked through: on a book with 4000 lapsed bids above 20 live ones, one probe measured 1.078 ms against 0.109 ms for the same probe without the deadline test. The cost is bounded by how many lapsed orders sit above the best live price, and is self-limiting in practice — the chain drops them on the next match that reaches them. Should it ever stop being self-limiting, the fix is to maintain the quote as columns on [`inference_markets`](data-schema.md#inference_markets) written by the projector, turning the read into a keyed lookup with no scan.
 
 Both fetch paths (single-market and listing) share one builder, so the two cannot drift; the single-market request carries `now` for the same reason the listing does.
+
+### Ask volume (`totalAskTicks`)
+
+Each market row carries the ticks resting across its whole ask side, as a third `LEFT JOIN LATERAL`: `sum(amount_remaining)` over the [resting](#glossary) predicate with `NOT is_buy`, scaled by `quantity_precision`. It is therefore exactly depth's `totalAskTicks` for the same book at the same clock. An empty side sums to NULL, which renders `"0"` — a total of nothing, as on depth, not `null`. Only the ask side is carried; the bid-side total is not requested and would double the cost.
+
+Unlike the top-of-book probes this is an aggregate: it reads every resting ask on the book, so its cost grows with the book, not with the page. It is an index-only range scan of `inference_orders_liquidity_idx`, which carries both `amount_remaining` and `deadline`, so no row costs a heap fetch.
+
+The listing picks its page **before** joining: `FROM (SELECT … ORDER BY … LIMIT $3) inference_markets` and only then the three LATERALs. Nothing indexes the sort key, so the planner sorts every visible book before `LIMIT`; with the joins at the same level it ran them for every visible book too — for the top-of-book probes that was cheap, for a whole-side sum it is not. The `?liquidity=` predicate and the keyset stay inside the subquery, since they decide which books make the page.
+
+Measured on a local Postgres 16 with 1M orders across 200 books (1,500 resting asks per book), median of 25 runs:
+
+| Page | Before (top of book only) | Page-first, top of book only | Page-first + `totalAskTicks` |
+| --- | --- | --- | --- |
+| 51 rows | 4.5 ms | 3.4 ms | 11.5 ms |
+| 201 rows (every book) | 4.7 ms | 6.0 ms | 44.1 ms |
+
+That is about 0.15 µs per resting ask on the page's books. Should that stop being acceptable, the fix is the same as for the quote: keep the total as a column on [`inference_markets`](data-schema.md#inference_markets) maintained by the projector.
 
 ### Resting-liquidity filter (`?liquidity=`)
 
@@ -458,7 +475,7 @@ Both fetch paths (single-market and listing) share one builder, so the two canno
 
 The predicate is an `EXISTS` semi-join on `inference_orders.orderbook_address`, emitted per side: `BUY` adds `AND io.is_buy`, `SELL` adds `AND NOT io.is_buy`, `ANY` constrains neither, `BOTH` emits two independent `EXISTS`. Two properties are load-bearing:
 
-- **Existential, never aggregate.** The semi-join stops at the first matching row, so the filter costs one index probe per candidate book instead of a scan of its book. Summing here would make the listing's cost proportional to every open order on every visible book — which is why the listing carries no tick counts — [`/api/v1/inference/depth`](#apiv1inferencedepth) reports the whole-book totals for one book, where that scan is already being paid for.
+- **Existential, never aggregate.** The semi-join stops at the first matching row, so the filter costs one index probe per candidate book instead of a scan of its book. Summing here would make the filter's cost proportional to every open order on every *candidate* book, returned or not. The ask volume the listing does carry is summed only for the books on the page — see [Ask volume](#ask-volume-totalaskticks).
 - **No outcome dimension.** An `InferenceOrderBook` is one book per model, so `orderbook_address` plus a side is the whole key — exactly the leading edge of `inference_orders_liquidity_idx` (migration 0006). The prediction side needs an extra rule here (a market matches when *any* outcome quotes the side); the inference side does not.
 
 The side is an allow-listed enum (`LiquidityFilter::parse`) rendered as a literal SQL fragment; it consumes no bind parameter, so the listing's fixed `$1..$3` numbering is untouched. It is read through `non_blank_query`, so a present-but-blank value is `MissingParameter` → 400 rather than "no filter" — an unbound template variable would otherwise list every book, dry ones included. An unparseable value is `InvalidParameter` → 400. Unlike `status` — validated but not a predicate, since every visible row is `TRADING` — this one actually filters.

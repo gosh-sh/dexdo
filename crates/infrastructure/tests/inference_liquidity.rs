@@ -652,3 +652,68 @@ async fn the_listing_carries_the_top_of_book_too() {
     assert_eq!(m.best_bid.as_deref(), Some("0.000001234"));
     assert!(m.best_ask.is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Ask-side volume on the market object. `total_ask_ticks` must equal depth's
+// `total_ask_ticks` for the same book at the same clock.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_ask_volume_agrees_with_depth() {
+    let Some(pool) = setup().await else { return };
+    // Every exclusion rule fires: a lapsed ask, a closed ask, an exhausted ask,
+    // and a bid. The subscription ask counts, as depth counts it.
+    seed_book(&pool, "askvol", CHAIN_TIME).await;
+    open_order(&pool, "askvol", 1, false, "30").await;
+    seed_order(&pool, "askvol", 2, false, "12", "OPEN", true, None).await;
+    open_order_until(&pool, "askvol", 3, false, "7", NOW + 1000).await;
+    open_order_until(&pool, "askvol", 4, false, "500", NOW).await;
+    seed_order(&pool, "askvol", 5, false, "400", "CANCELLED", false, None).await;
+    open_order(&pool, "askvol", 6, false, "0").await;
+    open_order(&pool, "askvol", 7, true, "900").await;
+
+    let d = depth(&pool, "askvol").await.expect("depth");
+    let m = market(&pool, "askvol").await;
+    assert_eq!(m.total_ask_ticks, "49", "30 + 12 (subscription) + 7 (not yet lapsed)");
+    assert_eq!(m.total_ask_ticks, d.total_ask_ticks, "the market must agree with depth");
+}
+
+#[tokio::test]
+async fn a_book_with_no_asks_has_zero_ask_volume() {
+    let Some(pool) = setup().await else { return };
+    // Zero, not null: an empty side is a total of nothing, as on depth.
+    seed_book(&pool, "askvolnone", CHAIN_TIME).await;
+    open_order(&pool, "askvolnone", 1, true, "100").await;
+    assert_eq!(market(&pool, "askvolnone").await.total_ask_ticks, "0");
+
+    seed_book(&pool, "askvoldry", CHAIN_TIME).await;
+    assert_eq!(market(&pool, "askvoldry").await.total_ask_ticks, "0");
+}
+
+#[tokio::test]
+async fn the_listing_carries_the_ask_volume_too() {
+    let Some(pool) = setup().await else { return };
+    // The listing joins after choosing its page in a subquery; this proves the
+    // sum still correlates to the right book through that path.
+    seed_book(&pool, "askvollist", CHAIN_TIME).await;
+    open_order(&pool, "askvollist", 1, false, "40").await;
+    open_order(&pool, "askvollist", 2, false, "2").await;
+
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let page = repo
+        .list_inference_markets(&InferenceMarketsRequest::Listing(InferenceMarketsListing {
+            liquidity: Some(LiquidityFilter::Sell),
+            sort: InferenceMarketsSort::CreatedAtDesc,
+            cursor: None,
+            limit: LISTING_LIMIT,
+            now: NOW,
+        }))
+        .await
+        .expect("listing");
+    let m = page
+        .markets
+        .iter()
+        .find(|m| m.orderbook_address == ob_of("askvollist"))
+        .expect("seeded book in the page");
+    assert_eq!(m.total_ask_ticks, "42");
+}

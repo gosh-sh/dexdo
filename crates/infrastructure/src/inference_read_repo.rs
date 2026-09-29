@@ -55,6 +55,8 @@ struct InferenceMarketRow {
     reference_price: Option<String>,
     best_bid: Option<String>,
     best_ask: Option<String>,
+    /// Raw ticks resting on the ask side; `"0"` when none — see `ask_volume_join`.
+    total_ask_ticks: String,
     created_at: i64,
     created_at_micros: i64,
 }
@@ -79,6 +81,7 @@ const INFERENCE_MARKET_COLUMNS: &str = r#"
     version as contract_version, platform_fee_bps, price_precision, quantity_precision,
     tick_size, step_size, min_notional, reference_price::text as reference_price,
     best_bid.price::text as best_bid, best_ask.price::text as best_ask,
+    coalesce(ask_volume.ticks, 0)::text as total_ask_ticks,
     coalesce(extract(epoch from created_at_chain)::bigint, 0) as created_at,
     coalesce((least(greatest(extract(epoch from created_at_chain), 0), 4102444800) * 1000000)::bigint, 0) as created_at_micros
 "#;
@@ -92,10 +95,9 @@ const INFERENCE_MARKET_COLUMNS: &str = r#"
 /// the same reason it is skipped there.
 ///
 /// LATERAL rather than a second round trip: the join runs once per market row
-/// the SELECT produces, which the listing has already bounded by `LIMIT`, so
-/// the cost is two index probes per returned market and never two per visible
-/// book. Measured on 1M orders / 200 books: +2.0 ms on a 50-row page, +2.7 ms
-/// on a 200-row page.
+/// it is joined to. The listing selects its page in a subquery before joining
+/// (see `fetch_listing_inference`), so the cost is two index probes per
+/// returned market and never two per visible book.
 ///
 /// The probe stops at the first entry only while the top of book is live: the
 /// deadline test is not a prefix of the index key, so a wall of lapsed orders
@@ -115,9 +117,35 @@ fn top_of_book_joins(clock: &str) -> String {
         )
     };
     format!(
-        "{} best_bid on true {} best_ask on true",
+        "{} best_bid on true {} best_ask on true {}",
         side("is_buy", "desc"),
-        side("not is_buy", "asc")
+        side("not is_buy", "asc"),
+        ask_volume_join(clock)
+    )
+}
+
+/// Ticks resting on the market's ask side, as a LATERAL sum over the same
+/// resting predicate `/api/v1/inference/depth` totals — so `totalAskTicks` on
+/// the market equals depth's `totalAskTicks` for that book at the same clock.
+/// An empty side sums to NULL, which the column list coalesces to `0`.
+///
+/// Unlike the top-of-book probes this is an aggregate: it reads every resting
+/// ask on the book, so its cost grows with the book, not with the page. It is
+/// an index-only range scan of `inference_orders_liquidity_idx`, which carries
+/// both `amount_remaining` and `deadline`, so no row costs a heap fetch.
+/// Measured on 1M orders / 200 books with 1,500 resting asks each: about
+/// 0.15 µs per resting ask, so ~8 ms on a 50-row page.
+///
+/// Only the ask side is summed: the bid-side total is not asked for, and
+/// would double the cost.
+fn ask_volume_join(clock: &str) -> String {
+    format!(
+        "left join lateral (select sum(amount_remaining) as ticks from inference_orders \
+                             where orderbook_address = inference_markets.orderbook_address \
+                               and status = 'OPEN' \
+                               and amount_remaining > 0 \
+                               and (deadline is null or deadline > {clock}) \
+                               and not is_buy) ask_volume on true"
     )
 }
 
@@ -172,15 +200,24 @@ impl PostgresReadModelRepository {
         // liquidity filter referenced it; the top-of-book joins reference it on
         // every listing, so it is now always bound.
         let joins = top_of_book_joins("$4");
+        // The page is chosen in a subquery and only then joined. Nothing
+        // indexes the sort key, so the planner sorts every visible book before
+        // `LIMIT`; with the joins at the same level it would run them for every
+        // visible book too, and the ask-volume sum reads a whole book side.
+        // Aliasing the subquery `inference_markets` keeps the join fragments'
+        // correlation unchanged.
         let sql = format!(
-            "select {INFERENCE_MARKET_COLUMNS} from inference_markets {joins} \
-             where last_reconciled_at is not null \
-               and ($1::bigint is null \
-                    or (coalesce((least(greatest(extract(epoch from created_at_chain), 0), 4102444800) * 1000000)::bigint, 0), id) \
-                       < ($1, $2)){liquidity_predicate} \
+            "select {INFERENCE_MARKET_COLUMNS} \
+             from (select * from inference_markets \
+                   where last_reconciled_at is not null \
+                     and ($1::bigint is null \
+                          or (coalesce((least(greatest(extract(epoch from created_at_chain), 0), 4102444800) * 1000000)::bigint, 0), id) \
+                             < ($1, $2)){liquidity_predicate} \
+                   order by coalesce((least(greatest(extract(epoch from created_at_chain), 0), 4102444800) * 1000000)::bigint, 0) desc, \
+                            id desc \
+                   limit $3) inference_markets {joins} \
              order by coalesce((least(greatest(extract(epoch from created_at_chain), 0), 4102444800) * 1000000)::bigint, 0) desc, \
-                      id desc \
-             limit $3"
+                      id desc"
         );
         let mut rows: Vec<InferenceMarketRow> = sqlx::query_as(&sql)
             .bind(cursor_key)
@@ -329,6 +366,12 @@ fn assemble_inference_market(row: InferenceMarketRow) -> Result<InferenceMarket,
     };
     let best_bid = scale_quote(row.best_bid, "bid")?;
     let best_ask = scale_quote(row.best_ask, "ask")?;
+    // Scaled like depth's `totalAskTicks`, so the two agree digit for digit.
+    if BigUint::parse_bytes(row.total_ask_ticks.as_bytes(), 10).is_none() {
+        warn!(orderbook = %ob, raw = %row.total_ask_ticks, "inference ask-side total is not a non-negative integer");
+        return Err(anyhow!(DomainError::MarketInconsistent));
+    }
+    let total_ask_ticks = scale_uint_to_decimal(&row.total_ask_ticks, quantity_scale);
 
     let inconsistent = |field: &str| {
         warn!(orderbook = %ob, field, "inference trading-rule column null on a reconciled row");
@@ -354,6 +397,7 @@ fn assemble_inference_market(row: InferenceMarketRow) -> Result<InferenceMarket,
         reference_price,
         best_bid,
         best_ask,
+        total_ask_ticks,
         created_at: row.created_at,
     })
 }
@@ -363,10 +407,10 @@ fn assemble_inference_market(row: InferenceMarketRow) -> Result<InferenceMarket,
 ///
 /// Existential, never aggregate: the semi-join stops at the first matching
 /// row, so the filter costs one index probe per candidate book rather than a
-/// scan of its whole book. Summing here would make the listing's cost
-/// proportional to every open order on every visible book, which is why the
-/// listing carries no tick counts — `/api/v1/inference/depth` reports the
-/// whole-book totals for one book, where the scan is already being paid for.
+/// scan of its whole book. Summing here would make the filter's cost
+/// proportional to every open order on every candidate book, returned or not;
+/// the ask volume the listing does carry is summed only for the books on the
+/// page — see `ask_volume_join`.
 ///
 /// An `InferenceOrderBook` is one book per model, so — unlike the prediction
 /// side — there is no outcome dimension the probe has to quantify over: an

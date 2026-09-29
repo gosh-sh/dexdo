@@ -230,7 +230,7 @@ paths:
           - 'null'
       - name: liquidity
         in: query
-        description: Return only books currently holding resting liquidity of this side. For volume, read the totals on /api/v1/inference/depth.
+        description: Return only books currently holding resting liquidity of this side. Each market carries its ask volume as totalAskTicks; the bid-side total is on /api/v1/inference/depth.
         required: false
         schema:
           allOf:
@@ -1485,6 +1485,7 @@ components:
       - tickSize
       - stepSize
       - minNotional
+      - totalAskTicks
       - createdAt
       properties:
         bestAsk:
@@ -1546,6 +1547,12 @@ components:
           description: Decimal string; the buyer fee `platform_fee_bps / 10000`.
         tickSize:
           type: string
+        totalAskTicks:
+          type: string
+          description: |-
+            Ticks resting across the whole ask side — the same figure as
+            `totalAskTicks` on `/api/v1/inference/depth`. `"0"` when no ask is
+            matchable. There is no bid-side total on the market.
     InferenceMarketStatusDto:
       type: string
       description: Reserved for future inactive states; clients treat it as opaque.

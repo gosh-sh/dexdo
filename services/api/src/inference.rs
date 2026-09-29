@@ -77,6 +77,10 @@ struct InferenceMarketDto {
     best_bid: Option<String>,
     /// Lowest price a matchable ask rests at; `null` when no ask is matchable.
     best_ask: Option<String>,
+    /// Ticks resting across the whole ask side — the same figure as
+    /// `totalAskTicks` on `/api/v1/inference/depth`. `"0"` when no ask is
+    /// matchable. There is no bid-side total on the market.
+    total_ask_ticks: String,
     created_at: i64,
 }
 
@@ -103,7 +107,7 @@ impl From<InferenceMarketStatus> for InferenceMarketStatusDto {
         ("inferenceOrderBookAddress" = Option<String>, Query, description = "Single-market lookup. Mutually exclusive with filters and pagination."),
         ("status" = Option<String>, Query, description = "Comma-separated statuses to include. Currently only TRADING."),
         ("sort" = Option<String>, Query, description = "Sort field. createdAt (default, DESC)."),
-        ("liquidity" = Option<dto::LiquidityFilter>, Query, description = "Return only books currently holding resting liquidity of this side. For volume, read the totals on /api/v1/inference/depth."),
+        ("liquidity" = Option<dto::LiquidityFilter>, Query, description = "Return only books currently holding resting liquidity of this side. Each market carries its ask volume as totalAskTicks; the bid-side total is on /api/v1/inference/depth."),
         ("cursor" = Option<String>, Query, description = "Opaque pagination cursor from a previous call."),
         ("limit" = Option<i64>, Query, minimum = 1, maximum = 200, description = "Page size. Default 50, max 200; out-of-range values clamp."),
     ),
@@ -220,6 +224,7 @@ fn inference_market_to_dto(m: InferenceMarket) -> InferenceMarketDto {
         reference_price: m.reference_price,
         best_bid: m.best_bid,
         best_ask: m.best_ask,
+        total_ask_ticks: m.total_ask_ticks,
         created_at: m.created_at,
     }
 }
