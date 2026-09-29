@@ -442,6 +442,16 @@ Per row: render `modelRefName` from `model_ref`, falling back to `model_hash` wh
 
 `contractVersion` is passed through verbatim from [`inference_markets.version`](data-schema.md#inference_markets) — the **contract** version reported by the book's `getVersion()` getter (e.g. `"4.0.30"`), the same column the reconciler parses as semver for cross-version supersede resolution. It is **not** a model version: `modelRefName` is the model's own label and carries whatever the book reports, and the two columns are kept distinct on purpose. `null` when the getter has not yet populated the column. No decode or validation — an unreconciled book is already hidden by the visibility gate, and whatever string the getter returned is served as-is.
 
+### Top of book (`bestBid` / `bestAsk`)
+
+Each market row carries the best matchable quote on each side, built by two `LEFT JOIN LATERAL` sub-selects — `ORDER BY price DESC LIMIT 1` for the bid, `ASC` for the ask — over the same [resting](#glossary) predicate depth aggregates. `bestBid` is therefore exactly depth's first `bids` level, digit for digit: same filter, same `price_precision` scaling. An empty side yields no lateral row and renders `null`, never `"0"`.
+
+LATERAL rather than a second round trip: the join runs once per market row the SELECT produces, and the listing has already bounded that by `LIMIT`, so the cost is two index probes per *returned* market — never two per visible book. Measured on 1M orders across 200 books: **+2.0 ms on a 50-row page, +2.7 ms on a 200-row page**, roughly doubling a listing that costs 3–5 ms.
+
+The probe stops at the first index entry only while the top of book is live. `deadline` is not a prefix of the index key, so a wall of lapsed orders priced above the best live quote is walked through: on a book with 4000 lapsed bids above 20 live ones, one probe measured 1.078 ms against 0.109 ms for the same probe without the deadline test. The cost is bounded by how many lapsed orders sit above the best live price, and is self-limiting in practice — the chain drops them on the next match that reaches them. Should it ever stop being self-limiting, the fix is to maintain the quote as columns on [`inference_markets`](data-schema.md#inference_markets) written by the projector, turning the read into a keyed lookup with no scan.
+
+Both fetch paths (single-market and listing) share one builder, so the two cannot drift; the single-market request carries `now` for the same reason the listing does.
+
 ### Resting-liquidity filter (`?liquidity=`)
 
 `?liquidity=BUY|SELL|ANY|BOTH` keeps only books that currently have orders resting on them. "Resting" is `inference_orders.status = 'OPEN' AND amount_remaining > 0 AND (deadline IS NULL OR deadline > $now)` — byte for byte the predicate [`/api/v1/inference/depth`](#apiv1inferencedepth) aggregates, so the two endpoints cannot disagree about what is on the book. Subscriptions are not excluded for the same reason: depth counts them, so the filter counts them. The deadline conjunct is explained in [§ Lapsed vs EXPIRED](#lapsed-vs-expired); `$now` is the handler's request clock, threaded through `InferenceMarketsListing::now` rather than taken from SQL `now()` so one response cannot mix clocks.

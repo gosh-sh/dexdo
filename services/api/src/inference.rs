@@ -73,6 +73,12 @@ struct InferenceMarketDto {
     min_notional: String,
     /// Weekly-median price per tick; `null` when the book has no recent liquidity.
     reference_price: Option<String>,
+    /// Highest price a matchable bid rests at — the first level
+    /// `/api/v1/inference/depth` would return for this book. `null` when no bid
+    /// is matchable. Scaled like a depth level's price.
+    best_bid: Option<String>,
+    /// Lowest price a matchable ask rests at; `null` when no ask is matchable.
+    best_ask: Option<String>,
     created_at: i64,
 }
 
@@ -158,7 +164,7 @@ fn build_inference_markets_request(
         if conflicting {
             return Err(ApiError::from(DomainError::MissingParameter));
         }
-        return Ok(InferenceMarketsRequest::One { orderbook_address: addr });
+        return Ok(InferenceMarketsRequest::One { orderbook_address: addr, now });
     }
 
     // Listing path. `status` is validated (TRADING-only) but not stored: every
@@ -212,6 +218,8 @@ fn inference_market_to_dto(m: InferenceMarket) -> InferenceMarketDto {
         step_size: m.step_size,
         min_notional: m.min_notional,
         reference_price: m.reference_price,
+        best_bid: m.best_bid,
+        best_ask: m.best_ask,
         created_at: m.created_at,
     }
 }

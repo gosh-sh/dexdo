@@ -138,6 +138,65 @@ async fn open_order(pool: &PgPool, tag: &str, order_id: i64, is_buy: bool, ticks
     seed_order(pool, tag, order_id, is_buy, ticks, "OPEN", false, None).await;
 }
 
+/// An open order at an explicit `price`, with an optional deadline.
+async fn seed_order_priced(
+    pool: &PgPool,
+    tag: &str,
+    order_id: i64,
+    is_buy: bool,
+    ticks: &str,
+    price: i64,
+    deadline: Option<i64>,
+) {
+    sqlx::query(
+        r#"insert into inference_orders
+               (orderbook_address, order_id, is_buy, price,
+                amount_initial, amount_remaining, status, is_subscription,
+                deadline, last_chain_order)
+           values ($1, $2::numeric, $3, $4::numeric,
+                   1000::numeric, $5::numeric, 'OPEN', false, $6::numeric, $7)"#,
+    )
+    .bind(ob_of(tag))
+    .bind(order_id)
+    .bind(is_buy)
+    .bind(price)
+    .bind(ticks)
+    .bind(deadline)
+    .bind(format!("{order_id:04}"))
+    .execute(pool)
+    .await
+    .expect("insert priced order");
+}
+
+/// A priced order in a terminal state — it left the book, so it sets no quote.
+async fn seed_order_closed(
+    pool: &PgPool,
+    tag: &str,
+    order_id: i64,
+    is_buy: bool,
+    ticks: &str,
+    price: i64,
+    status: &str,
+) {
+    sqlx::query(
+        r#"insert into inference_orders
+               (orderbook_address, order_id, is_buy, price,
+                amount_initial, amount_remaining, status, is_subscription, last_chain_order)
+           values ($1, $2::numeric, $3, $4::numeric,
+                   1000::numeric, $5::numeric, $6, false, $7)"#,
+    )
+    .bind(ob_of(tag))
+    .bind(order_id)
+    .bind(is_buy)
+    .bind(price)
+    .bind(ticks)
+    .bind(status)
+    .bind(format!("{order_id:04}"))
+    .execute(pool)
+    .await
+    .expect("insert closed order");
+}
+
 /// An open order that expires at `deadline` (unix seconds).
 async fn open_order_until(
     pool: &PgPool,
@@ -235,7 +294,10 @@ async fn a_dry_book_is_hidden_by_the_filter_not_by_the_visibility_gate() {
     // reconcile gate — a dry book is still a tradable market.
     let repo = PostgresReadModelRepository::new(pool.clone());
     let page = repo
-        .list_inference_markets(&InferenceMarketsRequest::One { orderbook_address: ob_of("gate") })
+        .list_inference_markets(&InferenceMarketsRequest::One {
+            orderbook_address: ob_of("gate"),
+            now: NOW,
+        })
         .await
         .expect("single-book lookup");
     assert_eq!(page.markets.len(), 1);
@@ -477,4 +539,136 @@ async fn depth_and_liquidity_agree_about_what_is_resting() {
     assert_eq!(liq.bid_orders, 2);
     assert_eq!(liq.ask_ticks, "40", "depth and totals must agree");
     assert_eq!(liq.ask_orders, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Top of book on the market object. `best_bid` / `best_ask` must be the first
+// level `/api/v1/inference/depth` would return for the same book — same
+// resting definition, same scaling — so a client can screen on them without
+// a depth call per book.
+// ---------------------------------------------------------------------------
+
+/// The market row for `tag`, through the single-book path.
+async fn market(pool: &PgPool, tag: &str) -> dodex_domain::InferenceMarket {
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    repo.list_inference_markets(&InferenceMarketsRequest::One {
+        orderbook_address: ob_of(tag),
+        now: NOW,
+    })
+    .await
+    .expect("one market")
+    .markets
+    .pop()
+    .expect("market row")
+}
+
+#[tokio::test]
+async fn best_bid_and_ask_are_the_top_of_book() {
+    let Some(pool) = setup().await else { return };
+    seed_book(&pool, "top", CHAIN_TIME).await;
+    // Bids at 1000 / 1200 / 900, asks at 2000 / 1800 / 2500. Best bid is the
+    // highest bid, best ask the lowest ask — not the newest, not the biggest.
+    for (id, is_buy, price) in [
+        (1i64, true, 1000),
+        (2, true, 1200),
+        (3, true, 900),
+        (4, false, 2000),
+        (5, false, 1800),
+        (6, false, 2500),
+    ] {
+        seed_order_priced(&pool, "top", id, is_buy, "100", price, None).await;
+    }
+
+    let m = market(&pool, "top").await;
+    // price_precision is 9 on these fixtures, so a raw 1200 renders as 0.000001200.
+    assert_eq!(m.best_bid.as_deref(), Some("0.000001200"), "best bid is the highest bid");
+    assert_eq!(m.best_ask.as_deref(), Some("0.000001800"), "best ask is the lowest ask");
+}
+
+#[tokio::test]
+async fn an_empty_side_has_no_quote() {
+    let Some(pool) = setup().await else { return };
+    seed_book(&pool, "onesided", CHAIN_TIME).await;
+    seed_order_priced(&pool, "onesided", 1, true, "100", 1000, None).await;
+
+    let m = market(&pool, "onesided").await;
+    assert_eq!(m.best_bid.as_deref(), Some("0.000001000"));
+    assert!(m.best_ask.is_none(), "no ask rests, so there is no ask quote");
+
+    // And a book with nothing at all quotes neither side.
+    seed_book(&pool, "noquote", CHAIN_TIME).await;
+    let m = market(&pool, "noquote").await;
+    assert!(m.best_bid.is_none() && m.best_ask.is_none());
+}
+
+#[tokio::test]
+async fn the_top_of_book_skips_lapsed_and_closed_orders() {
+    let Some(pool) = setup().await else { return };
+    seed_book(&pool, "topstale", CHAIN_TIME).await;
+    // The best-priced bid has lapsed and the next one is cancelled, so the
+    // quote must fall through to the third. Same for the ask side.
+    seed_order_priced(&pool, "topstale", 1, true, "100", 9999, Some(NOW - 1)).await;
+    seed_order_closed(&pool, "topstale", 2, true, "100", 9000, "CANCELLED").await;
+    seed_order_priced(&pool, "topstale", 3, true, "100", 1000, None).await;
+    seed_order_priced(&pool, "topstale", 4, false, "100", 1, Some(NOW - 1)).await;
+    seed_order_priced(&pool, "topstale", 5, false, "100", 2000, None).await;
+
+    let m = market(&pool, "topstale").await;
+    assert_eq!(m.best_bid.as_deref(), Some("0.000001000"), "lapsed and cancelled bids skipped");
+    assert_eq!(m.best_ask.as_deref(), Some("0.000002000"), "the lapsed ask does not set the quote");
+}
+
+#[tokio::test]
+async fn the_top_of_book_agrees_with_depth() {
+    let Some(pool) = setup().await else { return };
+    // The invariant: whatever depth reports as its first level is what the
+    // market object quotes. Seed a book where every exclusion rule fires.
+    seed_book(&pool, "topagree", CHAIN_TIME).await;
+    seed_order_priced(&pool, "topagree", 1, true, "100", 5000, Some(NOW - 1)).await;
+    seed_order_priced(&pool, "topagree", 2, true, "100", 1500, None).await;
+    seed_order_priced(&pool, "topagree", 3, true, "100", 1400, Some(NOW + 1000)).await;
+    seed_order_priced(&pool, "topagree", 4, false, "100", 1700, None).await;
+
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let depth = repo.get_inference_depth(&ob_of("topagree"), 100, NOW).await.expect("depth");
+    let m = market(&pool, "topagree").await;
+
+    assert_eq!(
+        m.best_bid.as_deref(),
+        depth.bids.first().map(|l| l.price.as_str()),
+        "bestBid must equal depth's first bid level",
+    );
+    assert_eq!(
+        m.best_ask.as_deref(),
+        depth.asks.first().map(|l| l.price.as_str()),
+        "bestAsk must equal depth's first ask level",
+    );
+}
+
+#[tokio::test]
+async fn the_listing_carries_the_top_of_book_too() {
+    let Some(pool) = setup().await else { return };
+    // Both fetch paths build the quote from the same LATERAL, but only a test
+    // through the listing proves the join survives the keyset/ORDER BY clause.
+    seed_book(&pool, "toplist", CHAIN_TIME).await;
+    seed_order_priced(&pool, "toplist", 1, true, "100", 1234, None).await;
+
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let page = repo
+        .list_inference_markets(&InferenceMarketsRequest::Listing(InferenceMarketsListing {
+            liquidity: Some(LiquidityFilter::Buy),
+            sort: InferenceMarketsSort::CreatedAtDesc,
+            cursor: None,
+            limit: LISTING_LIMIT,
+            now: NOW,
+        }))
+        .await
+        .expect("listing");
+    let m = page
+        .markets
+        .iter()
+        .find(|m| m.orderbook_address == ob_of("toplist"))
+        .expect("seeded book in the page");
+    assert_eq!(m.best_bid.as_deref(), Some("0.000001234"));
+    assert!(m.best_ask.is_none());
 }

@@ -1543,6 +1543,19 @@ components:
       - minNotional
       - createdAt
       properties:
+        bestAsk:
+          type:
+          - string
+          - 'null'
+          description: Lowest price a matchable ask rests at; `null` when no ask is matchable.
+        bestBid:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Highest price a matchable bid rests at — the first level
+            `/api/v1/inference/depth` would return for this book. `null` when no bid
+            is matchable. Scaled like a depth level's price.
         contractVersion:
           type:
           - string

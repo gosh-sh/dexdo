@@ -97,6 +97,35 @@ async fn seed_order_until(
     .expect("seed order");
 }
 
+/// An open order at an explicit price, with an optional deadline.
+async fn seed_order_priced(
+    pool: &PgPool,
+    ob: &str,
+    id: i64,
+    is_buy: bool,
+    ticks: &str,
+    price: i64,
+    deadline: Option<i64>,
+) {
+    sqlx::query(
+        r#"insert into inference_orders
+               (orderbook_address, order_id, is_buy, price,
+                amount_initial, amount_remaining, status, deadline, last_chain_order)
+           values ($1, $2::numeric, $3, $4::numeric,
+                   1000::numeric, $5::numeric, 'OPEN', $6::numeric, $7)"#,
+    )
+    .bind(ob)
+    .bind(id)
+    .bind(is_buy)
+    .bind(price)
+    .bind(ticks)
+    .bind(deadline)
+    .bind(format!("{id:04}"))
+    .execute(pool)
+    .await
+    .expect("seed priced order");
+}
+
 /// A deadline safely in the past for any wall-clock this test can see. These
 /// HTTP tests go through the handler, which stamps its own `now_seconds()`, so
 /// the fixture is pinned relative to real time rather than a fixed constant.
@@ -376,4 +405,53 @@ async fn a_blank_include_expired_is_1102() {
     assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
     let body: Value = resp.take_json().await.expect("error body");
     assert_eq!(body["code"], -1102);
+}
+
+#[tokio::test]
+async fn markets_carry_the_top_of_book() {
+    let Some((service, pool, _kek, _pn)) = common::setup().await else { return };
+    let ob = "0:inf_liq_http_top";
+    purge(&pool, ob).await;
+    seed_market(&pool, ob, 1_700_000_500).await;
+    // Two live bids and one lapsed bid priced above both: the quote must be the
+    // best LIVE bid, not the best price on the book.
+    seed_order_priced(&pool, ob, 1, true, "100", 1200, None).await;
+    seed_order_priced(&pool, ob, 2, true, "100", 1000, None).await;
+    seed_order_priced(&pool, ob, 3, true, "100", 9999, Some(long_past())).await;
+    seed_order_priced(&pool, ob, 4, false, "100", 2000, Some(far_future())).await;
+
+    let mut resp = TestClient::get(format!(
+        "http://test/api/v1/inference/markets?inferenceOrderBookAddress={ob}"
+    ))
+    .send(&service)
+    .await;
+    assert_eq!(resp.status_code, Some(StatusCode::OK));
+    let body: Value = resp.take_json().await.expect("markets body");
+    let m = &body["markets"][0];
+    // price_precision 9 on this fixture, so raw 1200 renders as 0.000001200.
+    assert_eq!(m["bestBid"], "0.000001200", "the lapsed 9999 bid must not set the quote");
+    assert_eq!(m["bestAsk"], "0.000002000");
+
+    purge(&pool, ob).await;
+}
+
+#[tokio::test]
+async fn a_dry_book_quotes_neither_side() {
+    let Some((service, pool, _kek, _pn)) = common::setup().await else { return };
+    let ob = "0:inf_liq_http_noquote";
+    purge(&pool, ob).await;
+    seed_market(&pool, ob, 1_700_000_500).await;
+
+    let mut resp = TestClient::get(format!(
+        "http://test/api/v1/inference/markets?inferenceOrderBookAddress={ob}"
+    ))
+    .send(&service)
+    .await;
+    assert_eq!(resp.status_code, Some(StatusCode::OK));
+    let body: Value = resp.take_json().await.expect("markets body");
+    let m = &body["markets"][0];
+    assert!(m["bestBid"].is_null(), "an empty side is null, not absent or zero");
+    assert!(m["bestAsk"].is_null());
+
+    purge(&pool, ob).await;
 }

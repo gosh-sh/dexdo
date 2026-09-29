@@ -309,6 +309,18 @@ pub struct InferenceMarket {
     pub min_notional: String,
     /// `None` when the book has no recent liquidity (dry book).
     pub reference_price: Option<String>,
+    /// Top of book: the highest price a matchable bid rests at, scaled by
+    /// `price_precision` like a depth level. `None` when no bid is matchable —
+    /// the same "resting" definition the rest of the read path uses, so an
+    /// order that is in the book but past its deadline never surfaces here.
+    ///
+    /// This is the first level `/api/v1/inference/depth` would return, carried
+    /// on the market so a client screening many books does not need one depth
+    /// call each.
+    pub best_bid: Option<String>,
+    /// Top of book on the ask side: the lowest matchable ask. `None` when no
+    /// ask is matchable.
+    pub best_ask: Option<String>,
     pub created_at: i64,
 }
 

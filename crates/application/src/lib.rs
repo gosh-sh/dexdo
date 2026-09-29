@@ -158,16 +158,23 @@ pub struct InferenceMarketsListing {
     pub sort: InferenceMarketsSort,
     pub cursor: Option<String>,
     pub limit: u16,
-    /// Request wall-clock, unix seconds. Only the `liquidity` filter reads it —
-    /// an order past its deadline is no longer matchable, so it is not
-    /// liquidity. Threaded from the handler rather than taken from SQL `now()`
-    /// so one response cannot mix clocks, matching the prediction read path.
+    /// Request wall-clock, unix seconds. Read by the `liquidity` filter and by
+    /// the per-market top of book (`best_bid` / `best_ask`): an order past its
+    /// deadline is not matchable, so it is neither liquidity nor a quote.
+    /// Threaded from the handler rather than taken from SQL `now()` so one
+    /// response cannot mix clocks, matching the prediction read path.
     pub now: i64,
 }
 
 #[derive(Debug, Clone)]
 pub enum InferenceMarketsRequest {
-    One { orderbook_address: String },
+    /// `now` (unix seconds) is the same request clock the listing carries: the
+    /// market object's `best_bid` / `best_ask` are top-of-book, so they must be
+    /// cut at the same instant every other resting read is.
+    One {
+        orderbook_address: String,
+        now: i64,
+    },
     Listing(InferenceMarketsListing),
 }
 
@@ -7347,7 +7354,7 @@ mod inference_usecase_tests {
         ) -> Result<InferenceMarketsPage, anyhow::Error> {
             // Echo back the request shape so the test can assert pass-through.
             let next_cursor = match request {
-                InferenceMarketsRequest::One { orderbook_address } => {
+                InferenceMarketsRequest::One { orderbook_address, .. } => {
                     Some(orderbook_address.clone())
                 }
                 InferenceMarketsRequest::Listing(_) => None,
@@ -7411,7 +7418,10 @@ mod inference_usecase_tests {
     async fn markets_use_case_passes_request_through() {
         let uc = GetInferenceMarketsUseCase::new(Arc::new(StubInferenceRepo::default()));
         let page = uc
-            .execute(InferenceMarketsRequest::One { orderbook_address: "0:ob".into() })
+            .execute(InferenceMarketsRequest::One {
+                orderbook_address: "0:ob".into(),
+                now: 1_700_000_000,
+            })
             .await
             .unwrap();
         assert_eq!(page.next_cursor.as_deref(), Some("0:ob"));

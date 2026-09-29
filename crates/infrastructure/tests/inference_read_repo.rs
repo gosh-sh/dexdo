@@ -151,7 +151,10 @@ async fn one_market_renders_fees_identity_and_refprice() {
 
     let repo = PostgresReadModelRepository::new(pool.clone());
     let page = repo
-        .list_inference_markets(&InferenceMarketsRequest::One { orderbook_address: ob.into() })
+        .list_inference_markets(&InferenceMarketsRequest::One {
+            orderbook_address: ob.into(),
+            now: NOW,
+        })
         .await
         .expect("one market");
 
@@ -190,7 +193,10 @@ async fn ref_falls_back_to_model_hash_when_model_ref_null() {
 
     let repo = PostgresReadModelRepository::new(pool.clone());
     let page = repo
-        .list_inference_markets(&InferenceMarketsRequest::One { orderbook_address: ob.into() })
+        .list_inference_markets(&InferenceMarketsRequest::One {
+            orderbook_address: ob.into(),
+            now: NOW,
+        })
         .await
         .unwrap();
     let m = &page.markets[0];
@@ -208,6 +214,7 @@ async fn unknown_address_is_invalid_market_or_symbol() {
     let err = repo
         .list_inference_markets(&InferenceMarketsRequest::One {
             orderbook_address: "0:does_not_exist".into(),
+            now: NOW,
         })
         .await
         .unwrap_err();
@@ -244,6 +251,7 @@ async fn unreconciled_market_is_hidden_by_the_visibility_gate() {
     let err = repo
         .list_inference_markets(&InferenceMarketsRequest::One {
             orderbook_address: skeleton.into(),
+            now: NOW,
         })
         .await
         .unwrap_err();
@@ -278,7 +286,10 @@ async fn corrupt_price_precision_fails_closed() {
 
     let repo = PostgresReadModelRepository::new(pool.clone());
     let err = repo
-        .list_inference_markets(&InferenceMarketsRequest::One { orderbook_address: ob.into() })
+        .list_inference_markets(&InferenceMarketsRequest::One {
+            orderbook_address: ob.into(),
+            now: NOW,
+        })
         .await
         .unwrap_err();
     assert!(matches!(
@@ -303,7 +314,10 @@ async fn negative_platform_fee_bps_fails_closed() {
 
     let repo = PostgresReadModelRepository::new(pool.clone());
     let err = repo
-        .list_inference_markets(&InferenceMarketsRequest::One { orderbook_address: ob.into() })
+        .list_inference_markets(&InferenceMarketsRequest::One {
+            orderbook_address: ob.into(),
+            now: NOW,
+        })
         .await
         .unwrap_err();
     assert!(matches!(
@@ -323,7 +337,10 @@ async fn assert_corrupt_market_is_inconsistent(pool: &PgPool, ob: &str, corrupt_
     sqlx::query(corrupt_sql).bind(ob).execute(pool).await.unwrap();
     let repo = PostgresReadModelRepository::new(pool.clone());
     let err = repo
-        .list_inference_markets(&InferenceMarketsRequest::One { orderbook_address: ob.into() })
+        .list_inference_markets(&InferenceMarketsRequest::One {
+            orderbook_address: ob.into(),
+            now: NOW,
+        })
         .await
         .unwrap_err();
     assert!(
@@ -409,7 +426,10 @@ async fn listing_paginates_null_chain_time_last() {
 
     // And it renders with that coalesced timestamp rather than failing to decode.
     let page = repo
-        .list_inference_markets(&InferenceMarketsRequest::One { orderbook_address: d.into() })
+        .list_inference_markets(&InferenceMarketsRequest::One {
+            orderbook_address: d.into(),
+            now: NOW,
+        })
         .await
         .unwrap();
     assert_eq!(page.markets[0].created_at, 0);
@@ -535,7 +555,10 @@ async fn far_future_created_at_chain_does_not_overflow() {
 
     // Single-lookup must succeed (before the fix: Err from bigint overflow).
     let page = repo
-        .list_inference_markets(&InferenceMarketsRequest::One { orderbook_address: ob.into() })
+        .list_inference_markets(&InferenceMarketsRequest::One {
+            orderbook_address: ob.into(),
+            now: NOW,
+        })
         .await
         .expect("single-lookup of far-future market must not overflow");
     assert_eq!(page.markets.len(), 1);

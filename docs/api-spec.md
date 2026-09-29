@@ -835,6 +835,8 @@ GET /api/v1/inference/markets
 
 List the tradable models — one entry per model order book.
 
+`bestBid` / `bestAsk` carry each book's top of book, so screening many books does not need one [`/api/v1/inference/depth`](#inference-depth) call each. They obey the same definition of resting as depth: an order that is in the book but past its `deadline` sets no quote (see [Lapsed orders](#lapsed-orders)). For the volume behind the quote, not just its price, use [`/api/v1/inference/liquidity`](#inference-liquidity).
+
 Query parameters:
 
 | Name | Type | Mandatory | Description |
@@ -868,6 +870,8 @@ Response:
       "stepSize": "1",
       "minNotional": "1",
       "referencePrice": "1010",
+      "bestBid": "0.000001200",
+      "bestAsk": "0.000001800",
       "createdAt": 1709980000
     }
   ]
@@ -894,6 +898,8 @@ Response fields:
 | `stepSize` | DECIMAL | Minimum tick-quantity increment (`"1"`). |
 | `minNotional` | DECIMAL | Minimum order notional in `SHELL`. |
 | `referencePrice` | DECIMAL \| null | Weekly-median price per tick used to settle prediction markets. **`null`** when the book has no recent liquidity. |
+| `bestBid` | DECIMAL \| null | Top of book: the highest price a matchable bid rests at, scaled by `pricePrecision`. Identical to the first `bids` level [`/api/v1/inference/depth`](#inference-depth) would return for this book. **`null`** when no bid is matchable — an empty side, not a zero. |
+| `bestAsk` | DECIMAL \| null | The lowest price a matchable ask rests at; **`null`** when no ask is matchable. |
 | `createdAt` | LONG | Unix seconds. When the book was first seen. |
 
 Errors:

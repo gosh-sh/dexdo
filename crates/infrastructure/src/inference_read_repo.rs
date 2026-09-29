@@ -54,6 +54,8 @@ struct InferenceMarketRow {
     step_size: Option<String>,
     min_notional: Option<String>,
     reference_price: Option<String>,
+    best_bid: Option<String>,
+    best_ask: Option<String>,
     created_at: i64,
     created_at_micros: i64,
 }
@@ -87,21 +89,63 @@ const INFERENCE_MARKET_COLUMNS: &str = r#"
     id, orderbook_address, model_hash::text as model_hash, model_ref,
     version as contract_version, platform_fee_bps, price_precision, quantity_precision,
     tick_size, step_size, min_notional, reference_price::text as reference_price,
+    best_bid.price::text as best_bid, best_ask.price::text as best_ask,
     coalesce(extract(epoch from created_at_chain)::bigint, 0) as created_at,
     coalesce((least(greatest(extract(epoch from created_at_chain), 0), 4102444800) * 1000000)::bigint, 0) as created_at_micros
 "#;
+
+/// Top of book for the market row being selected, as two LATERAL sub-selects.
+///
+/// `$clock` is the caller's `$N` for the request clock. Each side is an
+/// `ORDER BY price … LIMIT 1` over the same resting predicate everything else
+/// on this path uses, so `bestBid` is exactly the first level
+/// `/api/v1/inference/depth` would return — a lapsed order is skipped here for
+/// the same reason it is skipped there.
+///
+/// LATERAL rather than a second round trip: the join runs once per market row
+/// the SELECT produces, which the listing has already bounded by `LIMIT`, so
+/// the cost is two index probes per returned market and never two per visible
+/// book. Measured on 1M orders / 200 books: +2.0 ms on a 50-row page, +2.7 ms
+/// on a 200-row page.
+///
+/// The probe stops at the first entry only while the top of book is live: the
+/// deadline test is not a prefix of the index key, so a wall of lapsed orders
+/// priced above the best live quote is walked through. That is bounded by how
+/// many lapsed orders sit above it, and self-limiting in practice — the book
+/// drops them on the next match that reaches them.
+fn top_of_book_joins(clock: &str) -> String {
+    let side = |is_buy_sql: &str, direction: &str| {
+        format!(
+            "left join lateral (select price from inference_orders \
+                                 where orderbook_address = inference_markets.orderbook_address \
+                                   and status = 'OPEN' \
+                                   and amount_remaining > 0 \
+                                   and (deadline is null or deadline > {clock}) \
+                                   and {is_buy_sql} \
+                                 order by price {direction} limit 1)"
+        )
+    };
+    format!(
+        "{} best_bid on true {} best_ask on true",
+        side("is_buy", "desc"),
+        side("not is_buy", "asc")
+    )
+}
 
 impl PostgresReadModelRepository {
     async fn fetch_one_inference(
         &self,
         orderbook_address: &str,
+        now: i64,
     ) -> Result<InferenceMarketsPage, anyhow::Error> {
+        let joins = top_of_book_joins("$2");
         let sql = format!(
-            "select {INFERENCE_MARKET_COLUMNS} from inference_markets \
+            "select {INFERENCE_MARKET_COLUMNS} from inference_markets {joins} \
              where orderbook_address = $1 and last_reconciled_at is not null limit 1"
         );
         let row: Option<InferenceMarketRow> = sqlx::query_as(&sql)
             .bind(orderbook_address)
+            .bind(now)
             .fetch_optional(self.pool())
             .await
             .context("select single inference market")?;
@@ -135,8 +179,12 @@ impl PostgresReadModelRepository {
         // (the side is an allow-listed enum, never user text) so the $1..$3
         // numbering above stays fixed whether or not the filter is present.
         let liquidity_predicate = inference_liquidity_predicate(listing.liquidity);
+        // `$4` is the request clock. It was conditional while only the optional
+        // liquidity filter referenced it; the top-of-book joins reference it on
+        // every listing, so it is now always bound.
+        let joins = top_of_book_joins("$4");
         let sql = format!(
-            "select {INFERENCE_MARKET_COLUMNS} from inference_markets \
+            "select {INFERENCE_MARKET_COLUMNS} from inference_markets {joins} \
              where last_reconciled_at is not null \
                and ($1::bigint is null \
                     or (coalesce((least(greatest(extract(epoch from created_at_chain), 0), 4102444800) * 1000000)::bigint, 0), id) \
@@ -145,15 +193,14 @@ impl PostgresReadModelRepository {
                       id desc \
              limit $3"
         );
-        let mut query = sqlx::query_as(&sql).bind(cursor_key).bind(cursor_id).bind(limit + 1);
-        // `$4` exists only inside the liquidity fragment. Postgres rejects a
-        // bind the statement does not reference, so this is conditional on the
-        // very thing that emits it.
-        if listing.liquidity.is_some() {
-            query = query.bind(listing.now);
-        }
-        let mut rows: Vec<InferenceMarketRow> =
-            query.fetch_all(self.pool()).await.context("select inference markets listing")?;
+        let mut rows: Vec<InferenceMarketRow> = sqlx::query_as(&sql)
+            .bind(cursor_key)
+            .bind(cursor_id)
+            .bind(limit + 1)
+            .bind(listing.now)
+            .fetch_all(self.pool())
+            .await
+            .context("select inference markets listing")?;
 
         let has_more = rows.len() as i64 > limit;
         if has_more {
@@ -178,8 +225,8 @@ impl InferenceReadRepository for PostgresReadModelRepository {
         request: &InferenceMarketsRequest,
     ) -> Result<InferenceMarketsPage, anyhow::Error> {
         match request {
-            InferenceMarketsRequest::One { orderbook_address } => {
-                self.fetch_one_inference(orderbook_address).await
+            InferenceMarketsRequest::One { orderbook_address, now } => {
+                self.fetch_one_inference(orderbook_address, *now).await
             }
             InferenceMarketsRequest::Listing(listing) => {
                 self.fetch_listing_inference(listing).await
@@ -284,6 +331,23 @@ fn assemble_inference_market(row: InferenceMarketRow) -> Result<InferenceMarket,
             Some(scale_uint_to_decimal(&raw, price_scale))
         }
     };
+    // Top of book, scaled exactly like a depth level's price so the two agree
+    // digit for digit. NULL is an empty side, not corruption — the LATERAL
+    // returns no row when nothing matchable rests. A non-numeric raw price is
+    // the same read-model corruption `get_inference_depth_impl` fails closed
+    // on, so it is rejected here too rather than rendered.
+    let scale_quote = |raw: Option<String>, side: &'static str| match raw {
+        None => Ok(None),
+        Some(raw) => {
+            if BigUint::parse_bytes(raw.as_bytes(), 10).is_none() {
+                warn!(orderbook = %ob, side, raw = %raw, "inference top-of-book price is not a non-negative integer");
+                return Err(anyhow!(DomainError::MarketInconsistent));
+            }
+            Ok(Some(scale_uint_to_decimal(&raw, price_scale)))
+        }
+    };
+    let best_bid = scale_quote(row.best_bid, "bid")?;
+    let best_ask = scale_quote(row.best_ask, "ask")?;
 
     let inconsistent = |field: &str| {
         warn!(orderbook = %ob, field, "inference trading-rule column null on a reconciled row");
@@ -307,6 +371,8 @@ fn assemble_inference_market(row: InferenceMarketRow) -> Result<InferenceMarket,
         step_size,
         min_notional,
         reference_price,
+        best_bid,
+        best_ask,
         created_at: row.created_at,
     })
 }
