@@ -145,7 +145,7 @@ What breaks, by change kind:
 
 | Change | Symptom | Fix |
 |---|---|---|
-| Event renamed or input **types** changed, repo ABI stale | Signature id unknown to old binary → `DecodeOutcome::UnknownId` → row stored with `event_type IS NULL`, never projected, silent except the `decode_errors`/undecodable counters. Check via staging-diag L2: `select count(*) from raw_events where event_type is null;` | Sync the ABI, rebuild, redeploy. Undecodable rows stay undecoded (no auto re-decode). |
+| Event renamed or input **types** changed, repo ABI stale | Signature id unknown to old binary → `DecodeOutcome::UnknownId` → row stored with `event_type IS NULL`, never projected, silent except the `decode_errors`/undecodable counters. Check via indexer-db-diag L2: `select count(*) from raw_events where event_type is null;` | Sync the ABI, rebuild, redeploy. Undecodable rows stay undecoded (no auto re-decode). |
 | Field **renamed** (ABI synced, projector stale) | Projector `.get("oldField")` misses → deterministic projection error → row retried forever via per-row savepoints → L2 backlog grows | Update the `apply_*` fn field names. |
 | New ABI's signature id **collides** with an existing one | `AmbiguousCollision` warn, row left undecoded | Add a dst route in `Decoder::new` (`add_route` with the modifiers.sol EVENT_ID). |
 | Event **removed** / no longer emitted | Nothing breaks; dead arms and enum variants linger | Optional cleanup; precedent: `OB_EPOCH_SETTLED = 145` kept in `modifiers.sol`, intentionally omitted from `order_book_events.rs`. |
