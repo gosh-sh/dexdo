@@ -1651,8 +1651,8 @@ dependencies = [
 
 [[package]]
 name = "dark_dex_halo2_private_witness_export_lib"
-version = "0.1.0"
-source = "git+https://github.com/gosh-sh/dexdo-halo2-kit?tag=v0.2.0#0a84437aea8f2572b83db1266f5a645fb16bb985"
+version = "0.2.0"
+source = "git+https://github.com/gosh-sh/dexdo-halo2-kit?tag=dark_dex_halo2_private_witness_export_lib-v0.2.0#965d462a6c8497f936b6d9cbee5ef0a703d48c8f"
 dependencies = [
  "anyhow",
  "clap",
@@ -1666,6 +1666,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber 0.3.23",
+ "tvm_types 2.24.21",
  "typed-builder",
 ]
 
@@ -1807,7 +1808,7 @@ dependencies = [
 [[package]]
 name = "dex-halo2-circuit"
 version = "0.1.0"
-source = "git+https://github.com/gosh-sh/dexdo-halo2-kit?tag=v0.2.0#0a84437aea8f2572b83db1266f5a645fb16bb985"
+source = "git+https://github.com/gosh-sh/dexdo-halo2-kit?tag=dark_dex_halo2_private_witness_export_lib-v0.2.0#965d462a6c8497f936b6d9cbee5ef0a703d48c8f"
 dependencies = [
  "clap",
  "dense-balanced-tree",
@@ -2946,7 +2947,7 @@ dependencies = [
 [[package]]
 name = "halo2-proover"
 version = "0.3.0"
-source = "git+https://github.com/gosh-sh/dexdo-halo2-kit?tag=v0.2.0#0a84437aea8f2572b83db1266f5a645fb16bb985"
+source = "git+https://github.com/gosh-sh/dexdo-halo2-kit?tag=dark_dex_halo2_private_witness_export_lib-v0.2.0#965d462a6c8497f936b6d9cbee5ef0a703d48c8f"
 dependencies = [
  "clap",
  "dex-halo2-circuit",
