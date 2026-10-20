@@ -2,6 +2,12 @@
 
 All notable changes to DEX.DO are recorded here. Entries are date-based, newest first.
 
+## [2026-10-20]
+
+### Fixed
+
+- **SDK: the voucher proof is built from the payment's own event.** `sdk/` moves the halo2 kit to `dark_dex_halo2_private_witness_export_lib-v0.2.0`. The witness exporter now takes the tracked external message whose hash matches the `event_boc` it is given, instead of the first one in the block, so a block carrying several note payments no longer yields a proof for someone else's voucher that RootPN rejects with 137. An `event_boc` that is empty, unreadable or absent from its block is now an export error rather than a fixture for a guessed event.
+
 ## [2026-09-29]
 
 ### Added
