@@ -247,6 +247,38 @@ pub(crate) enum InferenceOrderStatus {
     Expired,
 }
 
+/// An order flag on an inference order book: the chain's `uint8 flags`, by name. IOC 0x01,
+/// FOK 0x02, MARKET 0x04, POST_ONLY 0x08, TEE 0x10, AON 0x20, SUBSCRIPTION 0x40. IOC, FOK
+/// and MARKET never rest in the book. See docs/api-spec.md §Order flags.
+// Mirrors `dodex_application::InferenceOrderFlag`; `wire_value_tests` holds the wire names
+// to that enum's `as_public`.
+#[derive(Debug, Clone, Copy, Serialize, ToSchema)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub(crate) enum InferenceOrderFlag {
+    Ioc,
+    Fok,
+    Market,
+    PostOnly,
+    Tee,
+    Aon,
+    Subscription,
+}
+
+impl From<dodex_application::InferenceOrderFlag> for InferenceOrderFlag {
+    fn from(value: dodex_application::InferenceOrderFlag) -> Self {
+        use dodex_application::InferenceOrderFlag as A;
+        match value {
+            A::Ioc => Self::Ioc,
+            A::Fok => Self::Fok,
+            A::Market => Self::Market,
+            A::PostOnly => Self::PostOnly,
+            A::Tee => Self::Tee,
+            A::Aon => Self::Aon,
+            A::Subscription => Self::Subscription,
+        }
+    }
+}
+
 #[cfg(test)]
 mod wire_value_tests {
     use super::*;
@@ -313,6 +345,13 @@ mod wire_value_tests {
             .map(|s| s.as_public().to_string())
             .collect();
         assert_eq!(documented, served);
+    }
+
+    #[test]
+    fn inference_order_flag_matches_application_as_public() {
+        for flag in dodex_application::InferenceOrderFlag::ALL {
+            assert_eq!(wire(InferenceOrderFlag::from(flag)), flag.as_public());
+        }
     }
 
     #[test]

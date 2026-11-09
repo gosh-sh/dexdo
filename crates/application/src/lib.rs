@@ -363,12 +363,97 @@ impl InferenceSide {
     }
 }
 
+/// One bit of an `InferenceOrderBook` order's `uint8 flags`, named as the book names it.
+/// `inference_orders.flags` stores the whole mask; this is the public vocabulary for it,
+/// both in the response's `flags` array and in the `?flag=` filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InferenceOrderFlag {
+    Ioc,
+    Fok,
+    Market,
+    PostOnly,
+    Tee,
+    Aon,
+    Subscription,
+}
+
+impl InferenceOrderFlag {
+    /// Every flag, in ascending bit order — the order a rendered `flags` array lists them.
+    pub const ALL: [Self; 7] = [
+        Self::Ioc,
+        Self::Fok,
+        Self::Market,
+        Self::PostOnly,
+        Self::Tee,
+        Self::Aon,
+        Self::Subscription,
+    ];
+    /// The book's `SUPPORTED_FLAGS`: it refuses a placement carrying any other bit.
+    pub const SUPPORTED_MASK: i16 = 0x7F;
+
+    /// The bit in the chain's `uint8 flags`, as `InferenceOrderBook.sol` defines it.
+    pub fn bit(self) -> i16 {
+        match self {
+            Self::Ioc => 0x01,
+            Self::Fok => 0x02,
+            Self::Market => 0x04,
+            Self::PostOnly => 0x08,
+            Self::Tee => 0x10,
+            Self::Aon => 0x20,
+            Self::Subscription => 0x40,
+        }
+    }
+
+    pub fn as_public(self) -> &'static str {
+        match self {
+            Self::Ioc => "IOC",
+            Self::Fok => "FOK",
+            Self::Market => "MARKET",
+            Self::PostOnly => "POST_ONLY",
+            Self::Tee => "TEE",
+            Self::Aon => "AON",
+            Self::Subscription => "SUBSCRIPTION",
+        }
+    }
+
+    /// Parse the `?flag=` filter: exactly one name, case-sensitive like `side`. Blank is
+    /// [`DomainError::MissingParameter`]; anything else that is not a name — a
+    /// comma-separated list included — is [`DomainError::InvalidParameter`]. One flag
+    /// only, because only one bit can ride a partial index: a second one would be a heap
+    /// residual over the first bit's whole history.
+    pub fn parse(raw: &str) -> Result<Self, DomainError> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(DomainError::MissingParameter);
+        }
+        Self::ALL
+            .into_iter()
+            .find(|flag| flag.as_public() == trimmed)
+            .ok_or(DomainError::InvalidParameter)
+    }
+
+    /// The flags set in a stored mask, in ascending bit order; empty for a plain limit
+    /// order (`0`). `None` when the mask carries a bit outside [`Self::SUPPORTED_MASK`]
+    /// (a negative `smallint` included): no book this indexer decodes can produce one, and
+    /// a partial list would misdescribe the order.
+    pub fn from_mask(mask: i16) -> Option<Vec<Self>> {
+        if mask & !Self::SUPPORTED_MASK != 0 {
+            return None;
+        }
+        Some(Self::ALL.into_iter().filter(|flag| mask & flag.bit() != 0).collect())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct InferenceOrdersQuery {
     pub orderbook_address: String,
     pub token_contract: Option<String>,
     pub note: Option<String>,
     pub side: Option<InferenceSide>,
+    /// Rows whose `flags` carry this bit. Never set together with `token_contract` or
+    /// `note`: no index pins a bit and either of those, so the pair would leave one of
+    /// them a heap residual. The use case refuses that combination.
+    pub flag: Option<InferenceOrderFlag>,
     /// Non-empty by type; an absent filter resolves to [`InferenceOrderStatusSet::all`].
     pub statuses: InferenceOrderStatusSet,
     pub limit: OrdersLimit,
@@ -407,6 +492,9 @@ pub struct InferenceOrderRow {
     pub ticks_initial: String,
     pub deadline: Option<String>,
     pub status: InferenceOrderStatus,
+    /// The stored `inference_orders.flags` mask, verbatim. `None` when the indexer does
+    /// not know the order's flags. Rendered through [`InferenceOrderFlag::from_mask`].
+    pub flags: Option<i16>,
     /// Unix seconds, as every timestamp this API returns. `None` when the chain
     /// timestamp was not recovered — the row is still served.
     ///
@@ -1327,6 +1415,8 @@ pub struct GetInferenceOrdersInput {
     pub note: Option<String>,
     pub side: Option<String>,
     pub status_csv: Option<String>,
+    /// Raw `?flag=`: one flag name.
+    pub flag: Option<String>,
     pub limit: Option<i64>,
     pub cursor: Option<String>,
     /// Request wall-clock, unix seconds.
@@ -1363,11 +1453,20 @@ where
             return Err(DomainError::InvalidParameter.into());
         }
 
+        // Same reason as the pair above, and refused on presence the same way: each flag has
+        // its own partial index, and none of them carries `token_contract` or
+        // `note_address`, so either combination would scan one filter's full history to
+        // apply the other.
+        if input.flag.is_some() && (input.token_contract.is_some() || input.note.is_some()) {
+            return Err(DomainError::InvalidParameter.into());
+        }
+
         let side = input.side.as_deref().map(InferenceSide::parse).transpose()?;
         let statuses = match input.status_csv.as_deref() {
             Some(csv) => InferenceOrderStatus::from_csv(csv)?,
             None => InferenceOrderStatusSet::all(),
         };
+        let flag = input.flag.as_deref().map(InferenceOrderFlag::parse).transpose()?;
         // Out-of-range numeric limits map to MissingParameter, matching
         // `/api/v1/prediction/orders`; a non-numeric limit is rejected earlier by the HTTP
         // boundary as InvalidParameter.
@@ -1385,6 +1484,7 @@ where
             token_contract: input.token_contract,
             note: input.note,
             side,
+            flag,
             statuses,
             limit,
             cursor,
@@ -7523,6 +7623,7 @@ mod inference_usecase_tests {
                 note: Some("0:note".into()),
                 side: None,
                 status_csv: None,
+                flag: None,
                 limit: None,
                 cursor: None,
                 now: 1_700_000_000,
@@ -7546,6 +7647,7 @@ mod inference_usecase_tests {
                     note: None,
                     side: None,
                     status_csv: None,
+                    flag: None,
                     limit: Some(limit),
                     cursor: None,
                     now: 1_700_000_000,
@@ -7577,6 +7679,7 @@ mod inference_usecase_tests {
                 note: None,
                 side: None,
                 status_csv: None,
+                flag: None,
                 limit: None,
                 cursor: None,
                 now: 1_700_000_000,
@@ -7589,5 +7692,92 @@ mod inference_usecase_tests {
         // count that has to be edited each time a terminal state is added.
         assert_eq!(seen.statuses.as_slice().len(), InferenceOrderStatus::ALL.len());
         assert_eq!(seen.limit.get(), ORDERS_DEFAULT_LIMIT);
+        assert_eq!(seen.flag, None);
+    }
+
+    #[test]
+    fn inference_order_flag_parses_exactly_one_public_name() {
+        use super::InferenceOrderFlag;
+        for flag in InferenceOrderFlag::ALL {
+            assert_eq!(InferenceOrderFlag::parse(flag.as_public()), Ok(flag));
+        }
+        assert_eq!(InferenceOrderFlag::parse(" AON "), Ok(InferenceOrderFlag::Aon));
+        assert_eq!(InferenceOrderFlag::parse(""), Err(DomainError::MissingParameter));
+        assert_eq!(InferenceOrderFlag::parse("  "), Err(DomainError::MissingParameter));
+        // Case-sensitive like `side`, and one flag only: a list is not a name.
+        for bad in ["aon", "Aon", "AON,TEE", "POST-ONLY", "GTC", "32"] {
+            assert_eq!(InferenceOrderFlag::parse(bad), Err(DomainError::InvalidParameter), "{bad}");
+        }
+    }
+
+    #[test]
+    fn inference_order_flag_bits_are_the_books_and_distinct() {
+        use super::InferenceOrderFlag;
+        let bits: Vec<i16> = InferenceOrderFlag::ALL.iter().map(|f| f.bit()).collect();
+        // `InferenceOrderBook.sol`: IOC, FOK, MARKET, POST_ONLY, TEE, AON, SUBSCRIPTION.
+        assert_eq!(bits, vec![0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40]);
+        assert_eq!(bits.iter().fold(0, |acc, b| acc | b), InferenceOrderFlag::SUPPORTED_MASK);
+    }
+
+    #[test]
+    fn inference_order_flag_renders_a_mask_in_bit_order_or_refuses_it() {
+        use super::InferenceOrderFlag as F;
+        assert_eq!(F::from_mask(0), Some(vec![]), "0 is a plain limit order");
+        assert_eq!(F::from_mask(0x30), Some(vec![F::Tee, F::Aon]));
+        assert_eq!(F::from_mask(0x60), Some(vec![F::Aon, F::Subscription]));
+        assert_eq!(F::from_mask(0x7F), Some(F::ALL.to_vec()));
+        // Outside SUPPORTED_FLAGS: no partial list.
+        assert_eq!(F::from_mask(0x80), None);
+        assert_eq!(F::from_mask(0xA0), None);
+        assert_eq!(F::from_mask(-1), None);
+    }
+
+    fn orders_input(flag: Option<&str>) -> GetInferenceOrdersInput {
+        GetInferenceOrdersInput {
+            orderbook_address: "0:ob".into(),
+            token_contract: None,
+            note: None,
+            side: None,
+            status_csv: None,
+            flag: flag.map(str::to_string),
+            limit: None,
+            cursor: None,
+            now: 1_700_000_000,
+            include_expired: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn get_inference_orders_passes_one_flag_through() {
+        let repo = StubInferenceRepo::default();
+        let use_case = GetInferenceOrdersUseCase::new(repo.clone());
+        use_case.execute(orders_input(Some("TEE"))).await.unwrap();
+        assert_eq!(repo.last_query().flag, Some(super::InferenceOrderFlag::Tee));
+    }
+
+    #[tokio::test]
+    async fn get_inference_orders_rejects_a_flag_with_note_or_token_contract() {
+        let use_case = GetInferenceOrdersUseCase::new(StubInferenceRepo::default());
+        let with_note =
+            GetInferenceOrdersInput { note: Some("0:note".into()), ..orders_input(Some("AON")) };
+        let with_tc = GetInferenceOrdersInput {
+            token_contract: Some("0:tc".into()),
+            ..orders_input(Some("AON"))
+        };
+        for input in [with_note, with_tc] {
+            let err = use_case.execute(input).await.unwrap_err();
+            // -1130: everything was supplied; no index serves the pair.
+            assert!(matches!(
+                err.downcast_ref::<DomainError>(),
+                Some(DomainError::InvalidParameter)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn get_inference_orders_rejects_an_unknown_flag() {
+        let use_case = GetInferenceOrdersUseCase::new(StubInferenceRepo::default());
+        let err = use_case.execute(orders_input(Some("GTC"))).await.unwrap_err();
+        assert!(matches!(err.downcast_ref::<DomainError>(), Some(DomainError::InvalidParameter)));
     }
 }

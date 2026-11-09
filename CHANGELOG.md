@@ -2,6 +2,18 @@
 
 All notable changes to DEX.DO are recorded here. Entries are date-based, newest first.
 
+## [2026-11-09]
+
+### Added
+
+- **`flags` on every row of `GET /api/v1/inference/orders`.** The flags the order was placed with, by name and in bit order: `IOC`, `FOK`, `MARKET`, `POST_ONLY`, `TEE`, `AON`, `SUBSCRIPTION`. `[]` is a plain limit order. `null` means the indexer does not know them: an order placed before this release that left the book before the reconciler swept it, or one of the retired subscription type, whose book predates the `AON` / `SUBSCRIPTION` bits. `IOC`, `FOK` and `MARKET` never rest, so look for them under `FILLED` / `CANCELLED`, not `LIVE`.
+- **`?flag=` on the same endpoint.** Returns only orders that carry that flag; other flags may be set too, and `null` never matches. Exactly one name, case-sensitive: an unknown name or a comma-separated list is `-1130 / 400`, a blank value `-1102 / 400`. It cannot be combined with `note` or `tokenContract` (`-1130 / 400`), for the same reason `note` and `tokenContract` cannot be combined: no index serves the pair.
+- **Migration `0007_inference_orders_flags` — run it.** Adds the nullable `inference_orders.flags` (`smallint`, the chain's `uint8`) and seven partial indexes `inference_orders_flag_{ioc,fok,market,post_only,tee,aon,subscription}_idx` on `(orderbook_address, is_buy, status, order_id DESC)`, one per bit, which back `?flag=`. Index creation is not `CONCURRENTLY`: the indexer applies migrations at startup, before it projects anything, and any other process writing `inference_orders` meanwhile blocks for the build. Existing rows start `NULL`. Over its next sweep cycle the reconciler fills those still in the book from `getOrder`, at no extra chain calls; rows that already left the book stay `null`.
+
+### Fixed
+
+- **`inference_orders.is_subscription` follows the `SUBSCRIPTION` flag.** An order placed with bit `0x40` used to be stored as `false`. New placements now set it from the flag, and the reconciler's flag repair sets it on live orders placed before. No endpoint reads the column.
+
 ## [2026-09-29]
 
 ### Added

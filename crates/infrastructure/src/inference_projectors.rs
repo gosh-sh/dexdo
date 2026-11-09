@@ -6,6 +6,7 @@
 // batch tx even on Deferred — see indexer_repo.rs).
 
 use anyhow::Context;
+use dodex_application::InferenceOrderFlag;
 use sqlx::Postgres;
 use sqlx::Transaction;
 use tracing::error;
@@ -92,9 +93,18 @@ async fn seed_market_skeleton(
     Ok(())
 }
 
-// Shared resting-order upsert for OrderPlaced (is_subscription=false) and
-// SubscriptionPlaced (is_subscription=true). Same still-fresh conflict guard as
-// projectors::apply_order_placed: a replay onto a closed or partially-filled-OPEN
+/// Decode an `InferenceOrderBook` `uint8 flags` field — from `InferenceOrderPlaced` or from
+/// `getOrder` — into the `inference_orders.flags` column type. Strict: a missing or
+/// non-`uint8` value is an error, never a silent NULL or zero.
+pub(crate) fn flags_field(value: &serde_json::Value) -> anyhow::Result<i16> {
+    let raw = uint_field_to_decimal(value, "flags")?;
+    let flags = raw.parse::<u8>().with_context(|| format!("flags is not a uint8: {raw}"))?;
+    Ok(i16::from(flags))
+}
+
+// Shared resting-order upsert for OrderPlaced (flags from the event) and the retired
+// SubscriptionPlaced (is_subscription=true, flags NULL). Same still-fresh conflict guard
+// as projectors::apply_order_placed: a replay onto a closed or partially-filled-OPEN
 // row is a no-op, so it never resets amount_remaining and corrupts depth.
 #[allow(clippy::too_many_arguments)]
 async fn upsert_resting_order(
@@ -105,6 +115,7 @@ async fn upsert_resting_order(
     price: &str,
     ticks: &str,
     is_subscription: bool,
+    flags: Option<i16>,
     note: Option<&str>,
     token_contract: Option<&str>,
     deadline: Option<&str>,
@@ -115,10 +126,11 @@ async fn upsert_resting_order(
         r#"insert into inference_orders
                (orderbook_address, order_id, is_buy, price, amount_initial, amount_remaining,
                 is_subscription, note_address, token_contract, deadline, status, last_chain_order,
-                chain_created_at, chain_updated_at, updated_at)
+                chain_created_at, chain_updated_at, updated_at, flags)
            values ($1, $2::numeric, $3, $4::numeric, $5::numeric, $5::numeric,
                    $6, $7, $8, $9::numeric, 'OPEN', $10,
-                   to_timestamp($11::double precision), to_timestamp($11::double precision), now())
+                   to_timestamp($11::double precision), to_timestamp($11::double precision), now(),
+                   $12)
            on conflict (orderbook_address, order_id) do update
                set is_buy = excluded.is_buy,
                    price = excluded.price,
@@ -130,6 +142,7 @@ async fn upsert_resting_order(
                    -- and neither may erase a value the reconciler recovered from chain.
                    token_contract = coalesce(excluded.token_contract, inference_orders.token_contract),
                    deadline = coalesce(excluded.deadline, inference_orders.deadline),
+                   flags = coalesce(excluded.flags, inference_orders.flags),
                    status = 'OPEN',
                    last_chain_order = greatest(inference_orders.last_chain_order, excluded.last_chain_order),
                    chain_created_at = coalesce(inference_orders.chain_created_at, excluded.chain_created_at),
@@ -140,7 +153,7 @@ async fn upsert_resting_order(
     )
     .bind(ob).bind(order_id).bind(is_buy).bind(price).bind(ticks)
     .bind(is_subscription).bind(note).bind(token_contract).bind(deadline)
-    .bind(chain_order).bind(chain_seconds)
+    .bind(chain_order).bind(chain_seconds).bind(flags)
     .execute(&mut **tx).await.context("upsert inference_orders resting")?;
 
     // rows_affected = 0 only when the conflict arm's WHERE rejected the update:
@@ -177,7 +190,7 @@ async fn apply_inference_order_placed(
     let ticks = uint_field_to_decimal(&event.value, "ticks")?;
     // `note` is mandatory in the ABI and the endpoint filters exactly on it; a NULL
     // would hide the order from every `note=X` listing forever, since the sweep
-    // repairs only `token_contract` and `deadline`.
+    // repairs only `token_contract`, `deadline` and `flags`.
     let note = Some(field_str(&event.value, "note")?);
     // `tokenContract` and `deadline` are mandatory in the ABI too — a BUY carries the
     // zero address and a good-till-cancel BUY (before 4.0.31, any SELL) carries
@@ -189,6 +202,11 @@ async fn apply_inference_order_placed(
         non_zero_address(Some(field_str(&event.value, "tokenContract")?));
     let deadline: Option<String> =
         non_zero_uint(Some(uint_field_to_decimal(&event.value, "deadline")?));
+    // `flags` has been on the event since contracts 4.0.30 and is decoded strictly for
+    // the same reason: a NULL here could only be repaired while the order stays in the
+    // book. `0` is a real value — a plain limit order.
+    let flags = flags_field(&event.value)?;
+    let is_subscription = flags & InferenceOrderFlag::Subscription.bit() != 0;
     let chain_order = node_chain_order(node, "InferenceOrderPlaced")?;
     let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
     upsert_resting_order(
@@ -198,7 +216,8 @@ async fn apply_inference_order_placed(
         is_buy,
         &price,
         &ticks,
-        false,
+        is_subscription,
+        Some(flags),
         note,
         token_contract,
         deadline.as_deref(),
@@ -252,6 +271,11 @@ async fn apply_inference_subscription_placed(
     // InferenceSubscriptionPlaced carries no tokenContract (a subscription is a bid) and
     // no deadline, though the chain stores one. The reconciler's getter probe is the only
     // source for a subscription row's deadline.
+    //
+    // Its `flags` (0 or TEE) are not stored either: the book that emits this event
+    // (contracts 4.0.30) predates the AON and SUBSCRIPTION bits, so they would describe
+    // the subscription as a plain order. NULL says "unknown" instead, and the sweep's
+    // repair leaves `is_subscription` rows alone for the same reason.
     upsert_resting_order(
         tx,
         ob,
@@ -260,6 +284,7 @@ async fn apply_inference_subscription_placed(
         &price,
         &ticks,
         true,
+        None,
         note,
         None,
         None,

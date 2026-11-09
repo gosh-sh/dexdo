@@ -327,6 +327,14 @@ paths:
             $ref: '#/components/schemas/InferenceOrderStatus'
         style: form
         explode: false
+      - name: flag
+        in: query
+        description: 'One order flag. Returns only orders that carry it; other flags may be set too. An order whose flags are unknown (flags: null) never matches. Cannot be combined with note or tokenContract.'
+        required: false
+        schema:
+          allOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/InferenceOrderFlag'
       - name: limit
         in: query
         description: Page size. Default 100, max 500; out-of-range values are rejected.
@@ -1604,6 +1612,16 @@ components:
           description: |-
             `null` means no deadline is known to the indexer — either the chain has none, or it
             has one the read model has not recovered yet (subscriptions never publish theirs).
+        flags:
+          type:
+          - array
+          - 'null'
+          items:
+            $ref: '#/components/schemas/InferenceOrderFlag'
+          description: |-
+            Flags the order was placed with, in ascending bit order. `[]` is a plain limit
+            order. `null` means the indexer does not know them: an order placed before it
+            recorded flags that has left the book, or one of the retired subscription type.
         inferenceOrderBookAddress:
           type: string
         note:
@@ -1635,6 +1653,20 @@ components:
           - integer
           - 'null'
           format: int64
+    InferenceOrderFlag:
+      type: string
+      description: |-
+        An order flag on an inference order book: the chain's `uint8 flags`, by name. IOC 0x01,
+        FOK 0x02, MARKET 0x04, POST_ONLY 0x08, TEE 0x10, AON 0x20, SUBSCRIPTION 0x40. IOC, FOK
+        and MARKET never rest in the book. See docs/api-spec.md §Order flags.
+      enum:
+      - IOC
+      - FOK
+      - MARKET
+      - POST_ONLY
+      - TEE
+      - AON
+      - SUBSCRIPTION
     InferenceOrderStatus:
       type: string
       description: |-

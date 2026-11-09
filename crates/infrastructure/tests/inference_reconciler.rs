@@ -1644,7 +1644,7 @@ async fn sweep_skips_the_repair_entirely_for_rows_that_need_nothing() {
     // that would encode the same falsehood the read path depends on being false.
     open_sell_order(&pool, ob, 1).await;
     sqlx::query(
-        "update inference_orders set token_contract='0:deal', deadline=1760003600 \
+        "update inference_orders set token_contract='0:deal', deadline=1760003600, flags=0 \
          where orderbook_address=$1 and order_id=1",
     )
     .bind(ob)
@@ -1655,9 +1655,9 @@ async fn sweep_skips_the_repair_entirely_for_rows_that_need_nothing() {
     let g = std::sync::Arc::new(FnGetter(|name: &str, _a: &Value| match name {
         "getQueueSize" => Ok(json!({ "value0": "0" })),
         "getStats" => Ok(json!({ "nextOrderId": "9", "orderCount": "1" })),
-        "getOrder" => {
-            Ok(json!({ "amount": "5", "tokenContract": "0:deal", "deadline": "1760003600" }))
-        }
+        "getOrder" => Ok(json!({
+            "amount": "5", "tokenContract": "0:deal", "deadline": "1760003600", "flags": "0"
+        })),
         _ => Ok(json!({})),
     }));
     let rec = InferenceReconciler::for_test_with_getter(pool.clone(), g);
@@ -1710,4 +1710,82 @@ async fn sweep_still_cancels_phantoms_and_partially_filled_buy_takers() {
     .await
     .unwrap();
     assert_eq!(statuses, vec!["CANCELLED", "CANCELLED"]);
+}
+
+async fn flags_row(pool: &sqlx::PgPool, ob: &str, id: i64) -> (Option<i16>, bool) {
+    sqlx::query_as(
+        "select flags, is_subscription from inference_orders where orderbook_address=$1 and order_id=$2",
+    )
+    .bind(ob)
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn updated_at_by_id(pool: &sqlx::PgPool, ob: &str) -> Vec<chrono::DateTime<chrono::Utc>> {
+    sqlx::query_scalar(
+        "select updated_at from inference_orders where orderbook_address=$1 order by order_id",
+    )
+    .bind(ob)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn sweep_repairs_unknown_flags_of_live_rows_but_not_of_retired_subscriptions() {
+    let Some(pool) = setup().await else { return };
+    let _guard = AT_HEAD_GATE_LOCK.lock().await;
+    let ob = "0:t_sweep_flags";
+    seed_market(&pool, ob, true).await;
+    set_at_head(&pool, true).await;
+    sqlx::query("delete from raw_events where src_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    open_order(&pool, ob, 1).await; // placed before 0007 with AON + SUBSCRIPTION
+    open_order(&pool, ob, 2).await; // placed before 0007 as a plain limit order
+    open_subscription_order(&pool, ob, 3).await; // the retired subscription type
+    open_order(&pool, ob, 4).await; // flags already known
+    sqlx::query("update inference_orders set flags = 32 where orderbook_address=$1 and order_id=4")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let g = std::sync::Arc::new(FnGetter(|name: &str, a: &Value| match name {
+        "getQueueSize" => Ok(json!({ "value0": "0" })),
+        "getStats" => Ok(json!({ "nextOrderId": "9" })),
+        "getOrder" => {
+            let flags = match a.get("id").and_then(|v| v.as_str()) {
+                Some("1") => "96",
+                Some("3") => "16", // a 4.0.30 book: TEE, no AON / SUBSCRIPTION bits
+                _ => "0",
+            };
+            Ok(json!({
+                "amount": "5", "tokenContract": ZERO_ADDRESS, "deadline": "1760003600",
+                "flags": flags,
+            }))
+        }
+        _ => Ok(json!({})),
+    }));
+    let r = InferenceReconciler::for_test_with_getter(pool.clone(), g);
+    r.run_sweep_step(ob, "boc", false).await.unwrap();
+
+    // The repair also marks the subscription the placement projector used to miss.
+    assert_eq!(flags_row(&pool, ob, 1).await, (Some(0x60), true));
+    // 0 is a real answer, stored as such.
+    assert_eq!(flags_row(&pool, ob, 2).await, (Some(0), false));
+    // The getter cannot describe a retired subscription: it stays unknown.
+    assert_eq!(flags_row(&pool, ob, 3).await, (None, true));
+    // A known mask is never overwritten, even by a different getter answer.
+    assert_eq!(flags_row(&pool, ob, 4).await, (Some(0x20), false));
+
+    // Nothing left to repair: a second cycle writes no row.
+    let before = updated_at_by_id(&pool, ob).await;
+    r.run_sweep_step(ob, "boc", false).await.unwrap();
+    assert_eq!(updated_at_by_id(&pool, ob).await, before, "a repaired row must not churn");
 }

@@ -555,10 +555,10 @@ This note covers the application-layer contract built in `crates/application/src
 `GetInferenceOrdersUseCase::execute` validates the raw `GetInferenceOrdersInput` into an `InferenceOrdersQuery` before anything reaches the repository:
 
 1. `orderbookAddress` blank / whitespace-only → `MissingParameter` → `-1102` / 400.
-2. `tokenContract` and `note` are mutually exclusive — see [§ tokenContract / note exclusion](#tokencontract--note-exclusion).
+2. `tokenContract` and `note` are mutually exclusive, and `flag` cannot be combined with either; each pair is refused on presence alone — see [§ tokenContract / note exclusion](#tokencontract--note-exclusion).
 3. `side`, if present, must be `BUY` or `SELL` (case-sensitive); blank → `MissingParameter` → `-1102` / 400; anything else → `InvalidParameter` → `-1130` / 400.
 4. `status` CSV — see [§ Status vocabulary](#status-vocabulary).
-5. `flag` — one name, never with `note` or `tokenContract`; see [§ Flags filter](#flags-filter).
+5. `flag` — exactly one name; see [§ Flags filter](#flags-filter).
 6. `limit` — see [§ Page-size protocol](#page-size-protocol-1).
 7. `cursor` — see [§ Cursor format](#cursor-format).
 

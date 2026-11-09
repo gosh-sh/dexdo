@@ -9,6 +9,7 @@
 use std::env;
 use std::time::Duration;
 
+use dodex_application::InferenceOrderFlag;
 use dodex_application::InferenceOrderStatus::Filled;
 use dodex_application::InferenceOrderStatus::Live;
 use dodex_application::InferenceOrderStatus::{self};
@@ -162,6 +163,7 @@ fn query(ob: &str) -> InferenceOrdersQuery {
         token_contract: None,
         note: None,
         side: None,
+        flag: None,
         statuses: InferenceOrderStatusSet::all(),
         limit: OrdersLimit::DEFAULT,
         cursor: None,
@@ -183,6 +185,7 @@ trait QueryBuilderExt {
     fn limit(self, limit: u16) -> Self;
     fn cursor(self, cursor: &str) -> Self;
     fn include_expired(self) -> Self;
+    fn flag(self, flag: InferenceOrderFlag) -> Self;
 }
 
 impl QueryBuilderExt for InferenceOrdersQuery {
@@ -214,6 +217,11 @@ impl QueryBuilderExt for InferenceOrdersQuery {
 
     fn include_expired(mut self) -> Self {
         self.include_expired = true;
+        self
+    }
+
+    fn flag(mut self, flag: InferenceOrderFlag) -> Self {
+        self.flag = Some(flag);
         self
     }
 
@@ -935,4 +943,103 @@ async fn a_token_contract_lookup_still_finds_a_lapsed_sell() {
     assert_eq!(page.orders.len(), 1);
 
     purge(&pool, ob).await;
+}
+
+async fn set_flags(pool: &PgPool, ob: &str, order_id: i64, flags: Option<i16>) {
+    sqlx::query(
+        "update inference_orders set flags = $3 where orderbook_address=$1 and order_id=$2",
+    )
+    .bind(ob)
+    .bind(order_id)
+    .bind(flags)
+    .execute(pool)
+    .await
+    .expect("set flags");
+}
+
+fn ids(page: &dodex_application::InferenceOrdersPage) -> Vec<&str> {
+    page.orders.iter().map(|o| o.order_id.as_str()).collect()
+}
+
+#[tokio::test]
+async fn every_row_carries_its_stored_flags_mask_verbatim() {
+    let Some(pool) = test_pool().await else { return };
+    let _guard = CAPTURE_CURSOR_LOCK.lock().await;
+    seed_at_head(&pool).await;
+    let ob = "0:flags-render";
+    purge(&pool, ob).await;
+    seed_reconciled_market(&pool, ob).await;
+    seed_order(&pool, ob, 1, true, "OPEN", None).await;
+    seed_order(&pool, ob, 2, false, "OPEN", Some("0:tc")).await;
+    seed_order(&pool, ob, 3, true, "FILLED", None).await;
+    set_flags(&pool, ob, 1, Some(0x30)).await;
+    set_flags(&pool, ob, 2, Some(0)).await;
+    // Order 3 keeps NULL: placed before the indexer recorded flags.
+
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let page = repo.list_inference_orders(&query(ob)).await.unwrap();
+    let flags: Vec<(&str, Option<i16>)> =
+        page.orders.iter().map(|o| (o.order_id.as_str(), o.flags)).collect();
+    assert_eq!(flags, vec![("3", None), ("2", Some(0)), ("1", Some(0x30))]);
+}
+
+#[tokio::test]
+async fn a_flag_filter_returns_only_rows_carrying_that_bit() {
+    let Some(pool) = test_pool().await else { return };
+    let _guard = CAPTURE_CURSOR_LOCK.lock().await;
+    seed_at_head(&pool).await;
+    let ob = "0:flags-filter";
+    purge(&pool, ob).await;
+    seed_reconciled_market(&pool, ob).await;
+    for (id, is_buy, status, tc, flags) in [
+        (1, true, "OPEN", None, Some(0x20)),            // AON
+        (2, false, "OPEN", Some("0:tc-2"), Some(0x30)), // TEE + AON
+        (3, true, "OPEN", None, Some(0x60)),            // AON + SUBSCRIPTION
+        (4, false, "OPEN", Some("0:tc-4"), Some(0x10)), // TEE only
+        (5, true, "OPEN", None, Some(0)),               // plain limit
+        (6, true, "OPEN", None, None),                  // unknown
+        (7, true, "FILLED", None, Some(0x22)),          // FOK + AON, gone
+    ] {
+        seed_order(&pool, ob, id, is_buy, status, tc).await;
+        set_flags(&pool, ob, id, flags).await;
+    }
+
+    let repo = PostgresReadModelRepository::new(pool.clone());
+
+    // Contains, not equals: other bits may be set. NULL never matches.
+    let page = repo.list_inference_orders(&query(ob).flag(InferenceOrderFlag::Aon)).await.unwrap();
+    assert_eq!(ids(&page), ["7", "3", "2", "1"]);
+
+    // Composes with side and status inside each branch.
+    let page = repo
+        .list_inference_orders(&query(ob).flag(InferenceOrderFlag::Aon).side(Buy).status(&[Live]))
+        .await
+        .unwrap();
+    assert_eq!(ids(&page), ["3", "1"]);
+
+    let page = repo.list_inference_orders(&query(ob).flag(InferenceOrderFlag::Tee)).await.unwrap();
+    assert_eq!(ids(&page), ["4", "2"]);
+
+    // A never-resting flag: only the terminal row carries it.
+    let page = repo
+        .list_inference_orders(&query(ob).flag(InferenceOrderFlag::Fok).status(&[Live]))
+        .await
+        .unwrap();
+    assert!(page.orders.is_empty());
+    let page = repo.list_inference_orders(&query(ob).flag(InferenceOrderFlag::Fok)).await.unwrap();
+    assert_eq!(ids(&page), ["7"]);
+
+    // Pagination stays in order_id order across the flagged branches.
+    let first = repo
+        .list_inference_orders(&query(ob).flag(InferenceOrderFlag::Aon).limit(3))
+        .await
+        .unwrap();
+    assert_eq!(ids(&first), ["7", "3", "2"]);
+    let cursor = first.next_cursor.clone().expect("a fourth AON row exists");
+    let second = repo
+        .list_inference_orders(&query(ob).flag(InferenceOrderFlag::Aon).limit(3).cursor(&cursor))
+        .await
+        .unwrap();
+    assert_eq!(ids(&second), ["1"]);
+    assert!(second.next_cursor.is_none());
 }
