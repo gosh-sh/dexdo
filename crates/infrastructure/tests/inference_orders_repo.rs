@@ -1020,13 +1020,11 @@ async fn a_flag_filter_returns_only_rows_carrying_that_bit() {
     let page = repo.list_inference_orders(&query(ob).flag(InferenceOrderFlag::Tee)).await.unwrap();
     assert_eq!(ids(&page), ["4", "2"]);
 
-    // A never-resting flag: only the terminal row carries it.
+    // A terminal row still matches on its resting bits: the filled FOK + AON order.
     let page = repo
-        .list_inference_orders(&query(ob).flag(InferenceOrderFlag::Fok).status(&[Live]))
+        .list_inference_orders(&query(ob).flag(InferenceOrderFlag::Aon).status(&[Filled]))
         .await
         .unwrap();
-    assert!(page.orders.is_empty());
-    let page = repo.list_inference_orders(&query(ob).flag(InferenceOrderFlag::Fok)).await.unwrap();
     assert_eq!(ids(&page), ["7"]);
 
     // Pagination stays in order_id order across the flagged branches.

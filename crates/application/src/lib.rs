@@ -363,9 +363,7 @@ impl InferenceSide {
     }
 }
 
-/// One bit of an `InferenceOrderBook` order's `uint8 flags`, named as the book names it.
-/// `inference_orders.flags` stores the whole mask; this is the public vocabulary for it,
-/// both in the response's `flags` array and in the `?flag=` filter.
+/// One bit of an `InferenceOrderBook` order's `uint8 flags`, by its public name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InferenceOrderFlag {
     Ioc,
@@ -378,7 +376,7 @@ pub enum InferenceOrderFlag {
 }
 
 impl InferenceOrderFlag {
-    /// Every flag, in ascending bit order — the order a rendered `flags` array lists them.
+    /// In bit order, the order `flags` renders in.
     pub const ALL: [Self; 7] = [
         Self::Ioc,
         Self::Fok,
@@ -388,10 +386,10 @@ impl InferenceOrderFlag {
         Self::Aon,
         Self::Subscription,
     ];
-    /// The book's `SUPPORTED_FLAGS`: it refuses a placement carrying any other bit.
+    /// The book's `SUPPORTED_FLAGS`.
     pub const SUPPORTED_MASK: i16 = 0x7F;
 
-    /// The bit in the chain's `uint8 flags`, as `InferenceOrderBook.sol` defines it.
+    /// The bit as `InferenceOrderBook.sol` defines it.
     pub fn bit(self) -> i16 {
         match self {
             Self::Ioc => 0x01,
@@ -416,11 +414,13 @@ impl InferenceOrderFlag {
         }
     }
 
-    /// Parse the `?flag=` filter: exactly one name, case-sensitive like `side`. Blank is
-    /// [`DomainError::MissingParameter`]; anything else that is not a name — a
-    /// comma-separated list included — is [`DomainError::InvalidParameter`]. One flag
-    /// only, because only one bit can ride a partial index: a second one would be a heap
-    /// residual over the first bit's whole history.
+    /// `IOC` / `FOK` / `MARKET` never rest: `_finalizeTaker` refunds instead of inserting.
+    pub fn can_rest(self) -> bool {
+        !matches!(self, Self::Ioc | Self::Fok | Self::Market)
+    }
+
+    /// Parse `?flag=`: one case-sensitive name of a flag that [can rest](Self::can_rest),
+    /// the only ones with an index. Blank → `MissingParameter`, anything else → `InvalidParameter`.
     pub fn parse(raw: &str) -> Result<Self, DomainError> {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
@@ -428,14 +428,11 @@ impl InferenceOrderFlag {
         }
         Self::ALL
             .into_iter()
-            .find(|flag| flag.as_public() == trimmed)
+            .find(|flag| flag.as_public() == trimmed && flag.can_rest())
             .ok_or(DomainError::InvalidParameter)
     }
 
-    /// The flags set in a stored mask, in ascending bit order; empty for a plain limit
-    /// order (`0`). `None` when the mask carries a bit outside [`Self::SUPPORTED_MASK`]
-    /// (a negative `smallint` included): no book this indexer decodes can produce one, and
-    /// a partial list would misdescribe the order.
+    /// Flags set in `mask`, in bit order. `None` if any bit is outside [`Self::SUPPORTED_MASK`].
     pub fn from_mask(mask: i16) -> Option<Vec<Self>> {
         if mask & !Self::SUPPORTED_MASK != 0 {
             return None;
@@ -450,9 +447,7 @@ pub struct InferenceOrdersQuery {
     pub token_contract: Option<String>,
     pub note: Option<String>,
     pub side: Option<InferenceSide>,
-    /// Rows whose `flags` carry this bit. Never set together with `token_contract` or
-    /// `note`: no index pins a bit and either of those, so the pair would leave one of
-    /// them a heap residual. The use case refuses that combination.
+    /// Rows carrying this bit. Never set with `token_contract` / `note`: no index serves the pair.
     pub flag: Option<InferenceOrderFlag>,
     /// Non-empty by type; an absent filter resolves to [`InferenceOrderStatusSet::all`].
     pub statuses: InferenceOrderStatusSet,
@@ -492,8 +487,7 @@ pub struct InferenceOrderRow {
     pub ticks_initial: String,
     pub deadline: Option<String>,
     pub status: InferenceOrderStatus,
-    /// The stored `inference_orders.flags` mask, verbatim. `None` when the indexer does
-    /// not know the order's flags. Rendered through [`InferenceOrderFlag::from_mask`].
+    /// Stored `inference_orders.flags` mask; `None` = unknown.
     pub flags: Option<i16>,
     /// Unix seconds, as every timestamp this API returns. `None` when the chain
     /// timestamp was not recovered — the row is still served.
@@ -1415,7 +1409,7 @@ pub struct GetInferenceOrdersInput {
     pub note: Option<String>,
     pub side: Option<String>,
     pub status_csv: Option<String>,
-    /// Raw `?flag=`: one flag name.
+    /// Raw `?flag=`.
     pub flag: Option<String>,
     pub limit: Option<i64>,
     pub cursor: Option<String>,
@@ -1453,10 +1447,7 @@ where
             return Err(DomainError::InvalidParameter.into());
         }
 
-        // Same reason as the pair above, and refused on presence the same way: each flag has
-        // its own partial index, and none of them carries `token_contract` or
-        // `note_address`, so either combination would scan one filter's full history to
-        // apply the other.
+        // Same reason as the pair above: no index serves a flag with either filter.
         if input.flag.is_some() && (input.token_contract.is_some() || input.note.is_some()) {
             return Err(DomainError::InvalidParameter.into());
         }
@@ -7696,16 +7687,27 @@ mod inference_usecase_tests {
     }
 
     #[test]
-    fn inference_order_flag_parses_exactly_one_public_name() {
+    fn inference_order_flag_parses_exactly_one_resting_flag_name() {
         use super::InferenceOrderFlag;
-        for flag in InferenceOrderFlag::ALL {
+        let resting: Vec<InferenceOrderFlag> =
+            InferenceOrderFlag::ALL.into_iter().filter(|f| f.can_rest()).collect();
+        assert_eq!(
+            resting,
+            [
+                InferenceOrderFlag::PostOnly,
+                InferenceOrderFlag::Tee,
+                InferenceOrderFlag::Aon,
+                InferenceOrderFlag::Subscription,
+            ],
+        );
+        for flag in resting {
             assert_eq!(InferenceOrderFlag::parse(flag.as_public()), Ok(flag));
         }
         assert_eq!(InferenceOrderFlag::parse(" AON "), Ok(InferenceOrderFlag::Aon));
         assert_eq!(InferenceOrderFlag::parse(""), Err(DomainError::MissingParameter));
         assert_eq!(InferenceOrderFlag::parse("  "), Err(DomainError::MissingParameter));
-        // Case-sensitive like `side`, and one flag only: a list is not a name.
-        for bad in ["aon", "Aon", "AON,TEE", "POST-ONLY", "GTC", "32"] {
+        // Case-sensitive, one flag, resting flags only.
+        for bad in ["aon", "Aon", "AON,TEE", "POST-ONLY", "GTC", "32", "IOC", "FOK", "MARKET"] {
             assert_eq!(InferenceOrderFlag::parse(bad), Err(DomainError::InvalidParameter), "{bad}");
         }
     }
@@ -7775,9 +7777,14 @@ mod inference_usecase_tests {
     }
 
     #[tokio::test]
-    async fn get_inference_orders_rejects_an_unknown_flag() {
+    async fn get_inference_orders_rejects_an_unknown_or_taker_only_flag() {
         let use_case = GetInferenceOrdersUseCase::new(StubInferenceRepo::default());
-        let err = use_case.execute(orders_input(Some("GTC"))).await.unwrap_err();
-        assert!(matches!(err.downcast_ref::<DomainError>(), Some(DomainError::InvalidParameter)));
+        for flag in ["GTC", "IOC", "FOK", "MARKET"] {
+            let err = use_case.execute(orders_input(Some(flag))).await.unwrap_err();
+            assert!(
+                matches!(err.downcast_ref::<DomainError>(), Some(DomainError::InvalidParameter)),
+                "{flag}",
+            );
+        }
     }
 }

@@ -93,19 +93,16 @@ async fn seed_market_skeleton(
     Ok(())
 }
 
-/// Decode an `InferenceOrderBook` `uint8 flags` field — from `InferenceOrderPlaced` or from
-/// `getOrder` — into the `inference_orders.flags` column type. Strict: a missing or
-/// non-`uint8` value is an error, never a silent NULL or zero.
+/// Strictly decode a `uint8 flags` field (event or `getOrder`): missing or wider is an error.
 pub(crate) fn flags_field(value: &serde_json::Value) -> anyhow::Result<i16> {
     let raw = uint_field_to_decimal(value, "flags")?;
     let flags = raw.parse::<u8>().with_context(|| format!("flags is not a uint8: {raw}"))?;
     Ok(i16::from(flags))
 }
 
-// Shared resting-order upsert for OrderPlaced (flags from the event) and the retired
-// SubscriptionPlaced (is_subscription=true, flags NULL). Same still-fresh conflict guard
-// as projectors::apply_order_placed: a replay onto a closed or partially-filled-OPEN
-// row is a no-op, so it never resets amount_remaining and corrupts depth.
+// Shared resting-order upsert for OrderPlaced and the retired SubscriptionPlaced. Same
+// still-fresh conflict guard as projectors::apply_order_placed: a replay onto a closed or
+// partially-filled-OPEN row is a no-op, so it never resets amount_remaining and corrupts depth.
 #[allow(clippy::too_many_arguments)]
 async fn upsert_resting_order(
     tx: &mut Transaction<'_, Postgres>,
@@ -202,9 +199,7 @@ async fn apply_inference_order_placed(
         non_zero_address(Some(field_str(&event.value, "tokenContract")?));
     let deadline: Option<String> =
         non_zero_uint(Some(uint_field_to_decimal(&event.value, "deadline")?));
-    // `flags` has been on the event since contracts 4.0.30 and is decoded strictly for
-    // the same reason: a NULL here could only be repaired while the order stays in the
-    // book. `0` is a real value — a plain limit order.
+    // Strict for the same reason. `0` is a plain limit order, not "unknown".
     let flags = flags_field(&event.value)?;
     let is_subscription = flags & InferenceOrderFlag::Subscription.bit() != 0;
     let chain_order = node_chain_order(node, "InferenceOrderPlaced")?;
@@ -271,11 +266,8 @@ async fn apply_inference_subscription_placed(
     // InferenceSubscriptionPlaced carries no tokenContract (a subscription is a bid) and
     // no deadline, though the chain stores one. The reconciler's getter probe is the only
     // source for a subscription row's deadline.
-    //
-    // Its `flags` (0 or TEE) are not stored either: the book that emits this event
-    // (contracts 4.0.30) predates the AON and SUBSCRIPTION bits, so they would describe
-    // the subscription as a plain order. NULL says "unknown" instead, and the sweep's
-    // repair leaves `is_subscription` rows alone for the same reason.
+    // Flags stay NULL: this 4.0.30 book predates AON / SUBSCRIPTION, so its `flags` would
+    // misdescribe the subscription.
     upsert_resting_order(
         tx,
         ob,

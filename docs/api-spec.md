@@ -994,7 +994,7 @@ Errors:
 GET /api/v1/inference/orders
 ```
 
-Orders resting in, or historic to, one model's book — the order-level counterpart to [`/api/v1/inference/depth`](#inference-depth), which shows only aggregated price levels. Each order reports the [flags](#order-flags) it was placed with (`FOK`, `AON`, `TEE`, …) and can be filtered by one of them.
+Orders resting in, or historic to, one model's book — the order-level counterpart to [`/api/v1/inference/depth`](#inference-depth), which shows only aggregated price levels. Each order reports the [flags](#order-flags) it was placed with (`FOK`, `AON`, `TEE`, …) and can be filtered by one of those that can rest in the book.
 
 Unlike [Inference Markets](#inference-markets) and [Inference Depth](#inference-depth), which collapse a present-but-blank query parameter to "absent", this endpoint rejects one with `-1102`. A blank `tokenContract=` silently becoming "no filter" would return the whole book and read as a confident answer to a question nobody asked; the caller must omit the parameter, not send it empty.
 
@@ -1007,7 +1007,7 @@ Query parameters:
 | `note` | STRING | NO | Exact owning PrivateNote address. Mutually exclusive with `tokenContract`. |
 | `side` | STRING | NO | `BUY` or `SELL`. |
 | `status` | STRING | NO | Comma-separated: `LIVE`, `FILLED`, `CANCELLED`, `EXPIRED`. Tokens are trimmed and de-duplicated. Default: all statuses. `LIVE` means the order is in the book; `EXPIRED` means the chain confirmed the book dropped it. Whether a `LIVE` row has passed its deadline is a separate question — see [`includeExpired`](#lapsed-orders). |
-| `flag` | STRING | NO | One [order flag](#order-flags), e.g. `AON`. Returns only orders that carry it; other flags may be set too. An order whose flags the indexer does not know (`flags: null`) never matches. Cannot be combined with `note` or `tokenContract`. Default: no flag filter. |
+| `flag` | STRING | NO | One [order flag](#order-flags) that can rest in the book: `POST_ONLY`, `TEE`, `AON` or `SUBSCRIPTION`. Returns only orders that carry it; other flags may be set too. An order whose flags the indexer does not know (`flags: null`) never matches. Cannot be combined with `note` or `tokenContract`. Send it once: a repeated `flag`, or `flags` (the response field's name, not a parameter), is rejected rather than ignored. Default: no flag filter. |
 | `limit` | INT | NO | Page size. Default: `100`. Range: `[1, 500]`; out-of-range values are rejected, not clamped. |
 | `cursor` | STRING | NO | Keyset cursor: the decimal `orderId` of the last row on the previous page, taken verbatim from a previous call's `nextCursor`. |
 | `includeExpired` | BOOLEAN | NO | Include `LIVE` rows whose `deadline` has already passed. Default `false`. Exactly `true` or `false`; any other value is `-1130`. A `tokenContract` query returns such rows either way. See [Lapsed orders](#lapsed-orders). |
@@ -1046,7 +1046,7 @@ Every order carries the flags it was placed with: execution instructions and dea
 
 - `flags` lists the names in the bit order above. `[]` is a plain limit order: it matches what it can, then rests the remainder until it is filled, cancelled, or reaches its `deadline`.
 - `null` means the indexer does not know the order's flags. That is an order placed before the indexer started recording flags: while it is still in the book, the reconciler recovers its flags on its next sweep, and one that has already left the book stays `null`. An order of the retired subscription type (books at contract 4.0.30 or earlier) also stays `null`, because its book predates the `AON` and `SUBSCRIPTION` bits and cannot report them. A `flag` filter never matches a `null` row.
-- `IOC`, `FOK` and `MARKET` never rest, so a `LIVE` order does not carry them except transiently (see the notes below). To find such orders, filter on `FILLED` or `CANCELLED`.
+- `IOC`, `FOK` and `MARKET` never rest, so a `LIVE` order does not carry them except transiently (see the notes below). They appear in `flags`, but the `flag` filter does not accept them (`-1130`): it covers the four flags that can rest.
 - The book refuses any bit outside `0x7F`, so this list is exhaustive for every contract version this API serves.
 
 Response:
@@ -1109,8 +1109,9 @@ Errors:
 | `tokenContract` and `note` both supplied | `-1130` | 400 |
 | `side` present and not `BUY` / `SELL` | `-1130` | 400 |
 | `status` contains an unknown token | `-1130` | 400 |
-| `flag` is not exactly one known flag name | `-1130` | 400 |
+| `flag` is not exactly one of `POST_ONLY`, `TEE`, `AON`, `SUBSCRIPTION` (an `IOC`, `FOK` or `MARKET` included) | `-1130` | 400 |
 | `flag` combined with `note` or `tokenContract` | `-1130` | 400 |
+| `flag` sent more than once, or `flags` sent | `-1130` | 400 |
 | `limit` present but not an integer | `-1130` | 400 |
 | `limit` outside `[1, 500]` | `-1102` | 400 |
 | `cursor` present but not all decimal digits, or oversized | `-1130` | 400 |

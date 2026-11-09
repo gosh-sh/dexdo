@@ -247,11 +247,8 @@ pub(crate) enum InferenceOrderStatus {
     Expired,
 }
 
-/// An order flag on an inference order book: the chain's `uint8 flags`, by name. IOC 0x01,
-/// FOK 0x02, MARKET 0x04, POST_ONLY 0x08, TEE 0x10, AON 0x20, SUBSCRIPTION 0x40. IOC, FOK
-/// and MARKET never rest in the book. See docs/api-spec.md §Order flags.
-// Mirrors `dodex_application::InferenceOrderFlag`; `wire_value_tests` holds the wire names
-// to that enum's `as_public`.
+/// An inference order flag, by name. See docs/api-spec.md §Order flags.
+// Mirrors `dodex_application::InferenceOrderFlag`; a test pins the names.
 #[derive(Debug, Clone, Copy, Serialize, ToSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub(crate) enum InferenceOrderFlag {
@@ -277,6 +274,18 @@ impl From<dodex_application::InferenceOrderFlag> for InferenceOrderFlag {
             A::Subscription => Self::Subscription,
         }
     }
+}
+
+/// Values accepted by the inference orders `flag` filter: the flags that can rest.
+// Documentation-only, like `MarketsSort`.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, Serialize, ToSchema)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub(crate) enum InferenceOrderFlagFilter {
+    PostOnly,
+    Tee,
+    Aon,
+    Subscription,
 }
 
 #[cfg(test)]
@@ -352,6 +361,26 @@ mod wire_value_tests {
         for flag in dodex_application::InferenceOrderFlag::ALL {
             assert_eq!(wire(InferenceOrderFlag::from(flag)), flag.as_public());
         }
+    }
+
+    // Keeps the documented filter values equal to what the parser accepts.
+    #[test]
+    fn inference_order_flag_filter_lists_exactly_the_parseable_flags() {
+        let documented: Vec<String> = [
+            InferenceOrderFlagFilter::PostOnly,
+            InferenceOrderFlagFilter::Tee,
+            InferenceOrderFlagFilter::Aon,
+            InferenceOrderFlagFilter::Subscription,
+        ]
+        .into_iter()
+        .map(wire)
+        .collect();
+        let accepted: Vec<String> = dodex_application::InferenceOrderFlag::ALL
+            .iter()
+            .filter(|f| dodex_application::InferenceOrderFlag::parse(f.as_public()).is_ok())
+            .map(|f| f.as_public().to_string())
+            .collect();
+        assert_eq!(documented, accepted);
     }
 
     #[test]

@@ -558,7 +558,7 @@ This note covers the application-layer contract built in `crates/application/src
 2. `tokenContract` and `note` are mutually exclusive, and `flag` cannot be combined with either; each pair is refused on presence alone — see [§ tokenContract / note exclusion](#tokencontract--note-exclusion).
 3. `side`, if present, must be `BUY` or `SELL` (case-sensitive); blank → `MissingParameter` → `-1102` / 400; anything else → `InvalidParameter` → `-1130` / 400.
 4. `status` CSV — see [§ Status vocabulary](#status-vocabulary).
-5. `flag` — exactly one name; see [§ Flags filter](#flags-filter).
+5. `flag` — exactly one name of a flag that can rest; see [§ Flags filter](#flags-filter).
 6. `limit` — see [§ Page-size protocol](#page-size-protocol-1).
 7. `cursor` — see [§ Cursor format](#cursor-format).
 
@@ -627,27 +627,31 @@ The predicate is a heap residual on that one branch rather than an index term, a
 
 Every row reports the flags its order was placed with, read from [`inference_orders.flags`](data-schema.md#inference_orders) (the chain `uint8`, migration 0007). The public vocabulary is `InferenceOrderFlag`, one name per contract bit:
 
-| Name | Bit |
-| --- | --- |
-| `IOC` | `0x01` |
-| `FOK` | `0x02` |
-| `MARKET` | `0x04` |
-| `POST_ONLY` | `0x08` |
-| `TEE` | `0x10` |
-| `AON` | `0x20` |
-| `SUBSCRIPTION` | `0x40` |
+| Name | Bit | Can rest | Filterable / indexed |
+| --- | --- | --- | --- |
+| `IOC` | `0x01` | no | no |
+| `FOK` | `0x02` | no | no |
+| `MARKET` | `0x04` | no | no |
+| `POST_ONLY` | `0x08` | yes | yes |
+| `TEE` | `0x10` | yes | yes |
+| `AON` | `0x20` | yes | yes |
+| `SUBSCRIPTION` | `0x40` | yes | yes |
+
+"Can rest" is `InferenceOrderFlag::can_rest`. It mirrors the book's `_finalizeTaker`: an order carrying `IOC`, `FOK` or `MARKET` is never inserted, and its unmatched remainder is refunded instead. Every flag is rendered; only the four that can rest are filterable.
 
 **Rendering.** The response maps each set bit to its name, in ascending bit order. `flags = 0` renders `[]`, and a NULL column renders `null`. A bit outside `SUPPORTED_FLAGS` (`0x7F`) cannot come from a contract this indexer decodes, because the book refuses such a placement. If one appears anyway, the row renders `flags: null` and the handler logs at `error!`: a partial list would misdescribe the order, while `null` already means "unknown".
 
-**Parsing.** `?flag=` is read through `non_blank_query` like every other filter on this endpoint, so a present-but-blank value is `MissingParameter` → `-1102` / 400. `InferenceOrderFlag::parse` accepts exactly one name, case-sensitive like `side`; anything else, a comma-separated list included, is `InvalidParameter` → `-1130` / 400. `flag` together with `note` or `tokenContract` is also `InvalidParameter` → `-1130` / 400, for the reason under **Index reliance** below. Absent means no flag filter.
+**Parsing.** `?flag=` is read through `non_blank_query` like every other filter on this endpoint, so a present-but-blank value is `MissingParameter` → `-1102` / 400. `InferenceOrderFlag::parse` accepts exactly one name of a flag that can rest, case-sensitive like `side`; anything else is `InvalidParameter` → `-1130` / 400 — a comma-separated list, and `IOC` / `FOK` / `MARKET` too, which have no index (see **Index reliance**). `flag` together with `note` or `tokenContract` is also `InvalidParameter` → `-1130` / 400, for the reason under **Index reliance** below. Absent means no flag filter.
+
+Two near-misses are refused by the handler before the use case runs, both `InvalidParameter` → `-1130` / 400: a `flags` parameter, and `flag` sent more than once. Without that, `flags=AON` — the response field's name — would be ignored and return the whole book, and `flag=AON&flag=TEE` would be read as its first value only; either is a confident answer to a question the client did not ask.
 
 **Semantics.** A row matches when it carries the requested bit (`(flags & B) <> 0`), whatever else it carries. A NULL row never matches. Three-valued logic gives that result without a special case, and it is the honest answer, since the indexer cannot say whether that order carried the flag. The filter composes with `side`, `status`, `includeExpired` and the cursor. It never changes which branches exist; it adds one conjunct inside each one.
 
 **SQL shape.** The requested bit adds one predicate to every `page` branch: `and (flags & 32) <> 0`. The bit is written as a **literal**, never a bind parameter. Postgres can use a partial index only when it can prove that the query's `WHERE` implies the index predicate, and a `$n` hides the constant from that proof. With a bind parameter the branch would fall back to `inference_orders_book_side_status_idx`, and the bit would become a heap residual over the whole status group, which is unbounded for history. The value comes from the closed `InferenceOrderFlag` enum, never from request text, so the literal opens no injection surface. A unit test pins the emitted predicate to the index definition, the same way `liquidity_predicate_never_aggregates_and_matches_the_index_predicate` does for the liquidity probe.
 
-**Index reliance.** Each per-bit partial index [`inference_orders_flag_*_idx`](data-schema.md#inference_orders) has the same key as `inference_orders_book_side_status_idx`, `(orderbook_address, is_buy, status, order_id DESC)`, restricted to the rows carrying its bit. A flag branch therefore reads only matching rows, in cursor order, and stops at `LIMIT`: the bit is an index condition, never a residual. That is why the filter takes exactly one flag and refuses `note` and `tokenContract`. No index pins two bits, or a bit together with a note or a TokenContract, so either shape would seek on one filter and check the other on the heap, a walk proportional to that filter's full history. This is the reasoning behind the [`tokenContract` / `note` exclusion](#tokencontract--note-exclusion).
+**Index reliance.** Each per-bit partial index [`inference_orders_flag_*_idx`](data-schema.md#inference_orders) (one per flag that can rest, migration 0008) has the same key as `inference_orders_book_side_status_idx`, `(orderbook_address, is_buy, status, order_id DESC)`, restricted to the rows carrying its bit. A flag branch therefore reads only matching rows, in cursor order, and stops at `LIMIT`: the bit is an index condition, never a residual. That is why the filter takes exactly one flag and refuses `note` and `tokenContract`. No index pins two bits, or a bit together with a note or a TokenContract, so either shape would seek on one filter and check the other on the heap, a walk proportional to that filter's full history. This is the reasoning behind the [`tokenContract` / `note` exclusion](#tokencontract--note-exclusion).
 
-`IOC`, `FOK` and `MARKET` never rest, so on a `LIVE` branch their index ranges are empty apart from the transient phantoms the sweep clears ([indexer.md § Non-resting orders](indexer.md#non-resting-orders)). Because `status` is part of the key, `flag=FOK&status=LIVE` costs one empty index probe per side.
+`IOC`, `FOK` and `MARKET` have no index, because they never rest: on a `LIVE` branch such an index would hold only the transient phantoms the sweep clears ([indexer.md § Non-resting orders](indexer.md#non-resting-orders)), and the rest of it would serve only history. Filtering on them without an index would walk a whole status group on the heap, so the filter refuses them instead.
 
 ### Page-size protocol
 
@@ -729,8 +733,9 @@ Arm 1 (`tc_unknown`) logs at `error!` on **every** request that observes it, eva
 | `status` CSV blank / whitespace-only | `MissingParameter` | `-1102` | 400 |
 | `status` CSV contains an unknown token | `InvalidParameter` | `-1130` | 400 |
 | `flag` blank / whitespace-only | `MissingParameter` | `-1102` | 400 |
-| `flag` is not exactly one known name | `InvalidParameter` | `-1130` | 400 |
+| `flag` is not exactly one name of a flag that can rest (`IOC`, `FOK`, `MARKET` included) | `InvalidParameter` | `-1130` | 400 |
 | `flag` combined with `note` or `tokenContract` | `InvalidParameter` | `-1130` | 400 |
+| `flag` sent more than once, or `flags` sent | `InvalidParameter` | `-1130` | 400 |
 | `includeExpired` present but blank | `MissingParameter` | `-1102` | 400 |
 | `includeExpired` present and not exactly `true` / `false` | `InvalidParameter` | `-1130` | 400 |
 | `limit` out of `[1, 500]` (including values outside `u16` range) | `MissingParameter` | `-1102` | 400 |

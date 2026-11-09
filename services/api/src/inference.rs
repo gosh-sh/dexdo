@@ -351,9 +351,7 @@ struct InferenceOrderDto {
     token_contract: Option<String>,
     note: Option<String>,
     side: &'static str,
-    /// Flags the order was placed with, in ascending bit order. `[]` is a plain limit
-    /// order. `null` means the indexer does not know them: an order placed before it
-    /// recorded flags that has left the book, or one of the retired subscription type.
+    /// Flags by name, in bit order. `[]` = plain limit order, `null` = unknown.
     flags: Option<Vec<dto::InferenceOrderFlag>>,
     price: String,
     ticks: String,
@@ -383,7 +381,7 @@ struct InferenceOrderDto {
         ("note" = Option<String>, Query, description = "Exact owning PrivateNote address. Mutually exclusive with `tokenContract`."),
         ("side" = Option<String>, Query, description = "BUY or SELL."),
         ("status" = Option<Vec<dto::InferenceOrderStatus>>, Query, style = Form, explode = false, description = "Comma-separated: LIVE, FILLED, CANCELLED, EXPIRED. Default: all. LIVE means the order is in the book; EXPIRED means the chain confirmed the book dropped it. Whether a LIVE row has passed its deadline is the separate includeExpired filter."),
-        ("flag" = Option<dto::InferenceOrderFlag>, Query, description = "One order flag. Returns only orders that carry it; other flags may be set too. An order whose flags are unknown (flags: null) never matches. Cannot be combined with note or tokenContract."),
+        ("flag" = Option<dto::InferenceOrderFlagFilter>, Query, description = "One order flag that can rest in the book: POST_ONLY, TEE, AON or SUBSCRIPTION. Returns only orders that carry it; other flags may be set too. An order whose flags are unknown (flags: null) never matches. IOC, FOK and MARKET never rest and are rejected with -1130, as is a flag combined with note or tokenContract, sent more than once, or sent as `flags`."),
         ("limit" = Option<i64>, Query, minimum = 1, maximum = 500, description = "Page size. Default 100, max 500; out-of-range values are rejected."),
         ("cursor" = Option<String>, Query, description = "Keyset cursor from a previous call's nextCursor."),
         ("includeExpired" = Option<bool>, Query, description = "Include orders that are in the book but past their deadline — present yet unmatchable. A filter of its own, composed with status. Default false. A tokenContract query returns such rows either way."),
@@ -408,6 +406,12 @@ pub(crate) async fn get_inference_orders(
 
     let address = non_blank_query(req, "inferenceOrderBookAddress")?
         .ok_or(ApiError::from(DomainError::MissingParameter))?;
+    // `flags=` would be ignored and a repeated `flag=` truncated to its first value: reject both.
+    if req.queries().contains_key("flags")
+        || req.queries().get_vec("flag").is_some_and(|values| values.len() > 1)
+    {
+        return Err(ApiError::from(DomainError::InvalidParameter));
+    }
     // One clock for both: clients compare `deadline` against `serverTime`, so
     // the rows must be cut at the instant the response reports.
     let now = now_seconds();
@@ -468,10 +472,7 @@ pub(crate) async fn get_inference_orders(
     }))
 }
 
-/// Names for a stored `inference_orders.flags` mask. A bit outside the book's
-/// `SUPPORTED_FLAGS` cannot come from any contract this indexer decodes; if one appears
-/// anyway the row is served with `flags: null` — "unknown" — rather than a partial list
-/// that would misdescribe the order, and the corruption is logged.
+/// Names for a stored mask. A bit outside `SUPPORTED_FLAGS` renders `null` and is logged.
 fn render_flags(
     orderbook_address: &str,
     order_id: &str,

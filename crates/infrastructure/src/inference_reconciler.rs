@@ -96,8 +96,7 @@ pub struct InferenceReconciler {
     reconcile_failures: Arc<AtomicU64>,
 }
 
-/// One live order's missing columns, recovered from `getOrder` by the sweep. A `None`
-/// field leaves the column as it is.
+/// Columns the sweep recovered from `getOrder`; `None` leaves a column as is.
 #[derive(Debug, Clone)]
 pub struct OrderFieldRepair {
     pub order_id: String,
@@ -587,11 +586,8 @@ impl InferenceReconciler {
         // nothing. Asking the database per order instead would cost one round trip per open
         // SELL — at ~95 ms per round trip to the deployed database, a book with a few
         // hundred orders would spend minutes in a single step.
-        //
-        // `flags_missing` excludes `is_subscription` rows: only the retired
-        // InferenceSubscriptionPlaced leaves both NULL flags and that mark, and its book
-        // predates the AON / SUBSCRIPTION bits, so `getOrder` would report the subscription
-        // as a plain order. Unknown is the honest value there.
+        // Retired subscriptions are excluded from `flags_missing`: their book predates
+        // AON / SUBSCRIPTION.
         let ids: Vec<(String, bool, bool, bool)> = sqlx::query_as(
             r#"select order_id::text,
                       token_contract is null as tc_missing,
@@ -616,8 +612,7 @@ impl InferenceReconciler {
         // a taker remainder refunded on chain without an event). A live order is also an
         // opportunity: the getter carries tokenContract, deadline and flags, so a row
         // missing any of them is repaired here at no extra chain cost. The repairs are
-        // independent — a BUY's TC is zero by design, a subscription's deadline exists
-        // only on chain, and a row placed before migration 0007 has no flags.
+        // independent.
         let mut to_cancel: Vec<String> = Vec::new();
         // Repairs are accumulated, not applied per order. One UPDATE per row would cost a
         // round trip each — and every subscription is born with a NULL deadline, so a fresh
@@ -667,9 +662,7 @@ impl InferenceReconciler {
             } else {
                 None
             };
-            // Stored as read, `0` included: a zero mask is a plain limit order, not an
-            // absent value. Only an order still in the book gets here (amount != 0); a
-            // removed id reads all zeros, which says nothing about how it was placed.
+            // `0` is stored too: a plain limit order, not an absent value.
             let flags: Option<i16> = if *flags_missing {
                 match flags_field(&o) {
                     Ok(v) => Some(v),
@@ -784,10 +777,9 @@ impl InferenceReconciler {
     /// Each column is applied only when the row is missing it AND the getter supplied one,
     /// so a row whose remaining NULL is intentional is never rewritten — a bare
     /// `IS NULL` predicate stays true forever on healthy rows (a BUY's TC, a good-till-cancel
-    /// BUY's deadline) and would churn `updated_at` every cycle. `flags` additionally skips
-    /// an `is_subscription` row (see the sweep batch), and sets `is_subscription` from bit
-    /// `0x40` in the same write, as the placement projector does. Returns the number of rows
-    /// changed, for logging only.
+    /// BUY's deadline) and would churn `updated_at` every cycle. `flags` also skips
+    /// `is_subscription` rows and sets `is_subscription` from bit `0x40`. Returns the number
+    /// of rows changed, for logging only.
     pub async fn repair_order_fields(
         &self,
         ob: &str,
@@ -806,10 +798,8 @@ impl InferenceReconciler {
         // point of use. Declaring the parameter `$2::numeric[]` instead would lean on
         // Postgres's array-level `text[] -> numeric[]` coercion, which is a different code
         // path for no gain here.
-        //
-        // `flags` binds as `smallint[]`, its column type. Every right-hand side in the SET
-        // list reads the row as it was before the UPDATE, so `is_subscription` is decided by
-        // the same `o.flags is null` test that admits the `flags` write.
+        // `flags` binds as `smallint[]`. SET reads the pre-UPDATE row, so both CASEs test
+        // the same `o.flags is null`.
         let res = sqlx::query(
             r#"update inference_orders o
                   set token_contract = coalesce(o.token_contract, r.tc),

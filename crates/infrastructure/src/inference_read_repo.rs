@@ -736,17 +736,8 @@ const PAGE_COLUMNS: &str = "order_id, token_contract, note_address, is_buy, pric
                             amount_remaining, amount_initial, deadline, status, flags, \
                             chain_created_at, chain_updated_at";
 
-/// The `?flag=` conjunct for one page branch.
-///
-/// The bit is a literal, never a bind parameter. Postgres uses a partial index only when
-/// it can prove at plan time that the query's `WHERE` implies the index predicate, and a
-/// `$n` hides the constant from that proof: the branch would fall back to
-/// `inference_orders_book_side_status_idx` and test the bit on the heap, row by row, over
-/// the whole status group. The value comes from the closed [`InferenceOrderFlag`] enum,
-/// never from request text, so the literal opens no injection surface.
-///
-/// It must spell exactly the predicate of that flag's `inference_orders_flag_*_idx`
-/// (migration 0007); a unit test holds the two together.
+/// The `?flag=` conjunct. A literal, not a bind: Postgres matches a partial index only
+/// against a constant. Must equal the migration 0008 predicate; a test pins it.
 fn flag_predicate(flag: InferenceOrderFlag) -> String {
     format!(" and (flags & {}) <> 0", flag.bit())
 }
@@ -851,8 +842,7 @@ fn build_snapshot_query<'a>(
                     b.push(" and note_address = ");
                     b.push_bind(note);
                 }
-                // The use case never combines a flag with `token_contract` or `note`, so a
-                // flagged branch always rides that bit's partial index.
+                // Never combined with tc / note, so this rides the bit's partial index.
                 if let Some(flag) = q.flag {
                     b.push(flag_predicate(flag));
                 }
@@ -1136,16 +1126,22 @@ mod tests {
         );
     }
 
-    /// Migration 0007 as `sqlx::migrate!` applies it, read at compile time.
+    /// Migration 0008 as `sqlx::migrate!` applies it, read at compile time.
     const FLAG_INDEX_MIGRATION: &str =
-        include_str!("../../../migrations/0007_inference_orders_flags.sql");
+        include_str!("../../../migrations/0008_inference_orders_flag_idx.sql");
 
     #[test]
     fn flag_predicate_is_a_literal_and_spells_its_partial_index_predicate() {
         for flag in InferenceOrderFlag::ALL {
+            let name =
+                format!("inference_orders_flag_{}_idx", flag.as_public().to_ascii_lowercase());
+            if !flag.can_rest() {
+                // Taker-only flags are not filterable, so no index.
+                assert!(!FLAG_INDEX_MIGRATION.contains(&name), "{name} must not exist");
+                continue;
+            }
             let predicate = flag_predicate(flag);
-            // A `$n` would hide the bit from the planner's implication proof and silently
-            // turn every flagged branch into a heap walk.
+            // A `$n` would defeat the partial index.
             assert!(!predicate.contains('$'), "the bit must be a literal; sql={predicate}");
             let condition = predicate.strip_prefix(" and ").expect("appended to a WHERE");
             let index = format!(
@@ -1156,7 +1152,7 @@ mod tests {
             );
             assert!(
                 FLAG_INDEX_MIGRATION.contains(&index),
-                "migration 0007 must define exactly this index for {flag:?}:\n{index}",
+                "migration 0008 must define exactly this index for {flag:?}:\n{index}",
             );
         }
     }
@@ -1181,8 +1177,7 @@ mod tests {
         let q = orders_query(Some(InferenceOrderFlag::Aon));
         let built = build_snapshot_query(&q, 101);
         let sql = built.sql();
-        // Two sides × four statuses: every branch must carry the bit, or that branch would
-        // return unflagged rows.
+        // 2 sides × 4 statuses: every branch must carry the bit.
         assert_eq!(sql.matches(" union all ").count() + 1, 8, "sql={sql}");
         assert_eq!(sql.matches(" and (flags & 32) <> 0").count(), 8, "sql={sql}");
 

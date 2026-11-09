@@ -443,7 +443,7 @@ async fn flag_filter_selects_by_one_flag() {
 }
 
 #[tokio::test]
-async fn flag_filter_rejects_blank_unknown_lists_and_note_or_token_contract() {
+async fn flag_filter_rejects_blank_unknown_lists_repeats_and_note_or_token_contract() {
     let Some((service, pool, _kek, _pn)) = common::setup().await else { return };
     seed_at_head(&pool).await;
     let ob = "0:orders-flag-errors";
@@ -455,8 +455,16 @@ async fn flag_filter_rejects_blank_unknown_lists_and_note_or_token_contract() {
         ("flag=aon", -1130),
         ("flag=AON,TEE", -1130),
         ("flag=GTC", -1130),
+        // Taker-only flags never rest, so they are not filterable.
+        ("flag=IOC", -1130),
+        ("flag=FOK", -1130),
+        ("flag=MARKET", -1130),
         ("flag=AON&note=0:n", -1130),
         ("flag=AON&tokenContract=0:tc", -1130),
+        // Near-misses that would otherwise be ignored or truncated without an error.
+        ("flags=AON", -1130),
+        ("flags=", -1130),
+        ("flag=AON&flag=TEE", -1130),
     ] {
         let mut resp = TestClient::get(format!(
             "http://test/api/v1/inference/orders?inferenceOrderBookAddress={ob}&{query}"
