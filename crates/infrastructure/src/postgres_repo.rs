@@ -2977,6 +2977,59 @@ fn parse_oracle_outcomes(
     Ok(out)
 }
 
+/// Postgres-backed repository for `ref_tokens` lookups. Kept as a
+/// separate type from `PostgresReadModelRepository` because callers
+/// on the balance path need only `lookup_ref_token` and pulling in
+/// the full market-read surface would widen coupling unnecessarily.
+#[derive(Clone)]
+pub struct PostgresReferenceRepository {
+    pool: PgPool,
+}
+
+impl PostgresReferenceRepository {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl dodex_application::ReferenceRepository for PostgresReferenceRepository {
+    async fn lookup_ref_token(
+        &self,
+        token_type: u32,
+    ) -> Result<Option<dodex_application::RefToken>, anyhow::Error> {
+        // The DB column is `integer` (i32 range). A u32 above i32::MAX
+        // cannot exist in the table — chain ABI is uint32 but the DB column
+        // is signed, so such a value is structurally impossible read-model
+        // corruption. Lift to MarketInconsistent instead of collapsing to
+        // `None` (which would be indistinguishable from an unknown row).
+        let bind = i32::try_from(token_type).map_err(|_| {
+            tracing::warn!(
+                token_type,
+                "ref_tokens lookup: token_type exceeds i32::MAX; structurally impossible value",
+            );
+            anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
+        })?;
+        let row: Option<(String, i32)> = sqlx::query_as(
+            r#"select token_code, decimals
+                 from ref_tokens
+                where token_type = $1"#,
+        )
+        .bind(bind)
+        .fetch_optional(&self.pool)
+        .await
+        .context("lookup_ref_token: select ref_tokens")?;
+        row.map(|(token_code, decimals)| -> Result<_, anyhow::Error> {
+            let decimals = u8::try_from(decimals).map_err(|_| {
+                tracing::warn!(token_type, raw = decimals, "decimals is out of range for u8");
+                anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
+            })?;
+            Ok(dodex_application::RefToken { token_type, token_code, decimals })
+        })
+        .transpose()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use dodex_application::MarketsFilter;
@@ -3773,58 +3826,5 @@ mod tests {
         assert!(frag.contains("$6::bigint"));
         assert!(frag.contains("meta_reconciled_at is not null"));
         assert!(frag.contains("oe.is_deleted = false"));
-    }
-}
-
-/// Postgres-backed repository for `ref_tokens` lookups. Kept as a
-/// separate type from `PostgresReadModelRepository` because callers
-/// on the balance path need only `lookup_ref_token` and pulling in
-/// the full market-read surface would widen coupling unnecessarily.
-#[derive(Clone)]
-pub struct PostgresReferenceRepository {
-    pool: PgPool,
-}
-
-impl PostgresReferenceRepository {
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
-    }
-}
-
-#[async_trait]
-impl dodex_application::ReferenceRepository for PostgresReferenceRepository {
-    async fn lookup_ref_token(
-        &self,
-        token_type: u32,
-    ) -> Result<Option<dodex_application::RefToken>, anyhow::Error> {
-        // The DB column is `integer` (i32 range). A u32 above i32::MAX
-        // cannot exist in the table — chain ABI is uint32 but the DB column
-        // is signed, so such a value is structurally impossible read-model
-        // corruption. Lift to MarketInconsistent instead of collapsing to
-        // `None` (which would be indistinguishable from an unknown row).
-        let bind = i32::try_from(token_type).map_err(|_| {
-            tracing::warn!(
-                token_type,
-                "ref_tokens lookup: token_type exceeds i32::MAX; structurally impossible value",
-            );
-            anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
-        })?;
-        let row: Option<(String, i32)> = sqlx::query_as(
-            r#"select token_code, decimals
-                 from ref_tokens
-                where token_type = $1"#,
-        )
-        .bind(bind)
-        .fetch_optional(&self.pool)
-        .await
-        .context("lookup_ref_token: select ref_tokens")?;
-        row.map(|(token_code, decimals)| -> Result<_, anyhow::Error> {
-            let decimals = u8::try_from(decimals).map_err(|_| {
-                tracing::warn!(token_type, raw = decimals, "decimals is out of range for u8");
-                anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
-            })?;
-            Ok(dodex_application::RefToken { token_type, token_code, decimals })
-        })
-        .transpose()
     }
 }
