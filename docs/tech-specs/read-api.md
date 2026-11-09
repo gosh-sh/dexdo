@@ -516,7 +516,7 @@ A reconciled book with no `OrderPlaced` yet returns the well-formed empty shape 
 
 One SQL query produces both sides. Per side, the database:
 
-1. Filters `inference_orders` to `status = 'OPEN' AND amount_remaining > 0 AND (deadline IS NULL OR deadline > $3)` for this `orderbook_address` (resting buy orders and subscriptions are bids, sell offers are asks). The deadline conjunct is not optional here — see [§ Lapsed vs EXPIRED](#lapsed-vs-expired).
+1. Filters `inference_orders` to `status = 'OPEN' AND amount_remaining > 0 AND (deadline IS NULL OR deadline > $3)` for this `orderbook_address` (buy orders are bids, sell offers are asks; a subscription counts on whichever side it was placed). The deadline conjunct is not optional here — see [§ Lapsed vs EXPIRED](#lapsed-vs-expired).
 2. Groups by `price`, sums `amount_remaining` — orders at one price collapse into one level (`[pricePerTick, ticks]`).
 3. Orders by price (bids DESC, asks ASC), `LIMIT $limit`. The partial index `inference_orders_open_book_idx` (`WHERE status = 'OPEN'`) backs this.
 
@@ -548,7 +548,7 @@ Each side is then re-sorted in Rust with exact-numeric `BigUint` comparison (lex
 
 Lists orders on one `InferenceOrderBook` — the inference analogue of [`/api/v1/prediction/orders`](#apiv1predictionorders), but public and unauthenticated rather than owner-scoped: an `InferenceOrderBook` has no per-order ownership column (see [`inference_orders`](data-schema.md#inference_orders)), so the endpoint filters by `tokenContract` or `note` instead of by caller identity. Source is [`inference_orders`](data-schema.md#inference_orders), never a contract call at request time.
 
-This note covers the application-layer contract built in `crates/application/src/lib.rs` — the validated types (`InferenceOrdersCursor`, `InferenceOrderStatus`, `InferenceSide`, `InferenceOrdersQuery`, `InferenceOrderRow`, `InferenceOrdersPage`), the `InferenceReadRepository::list_inference_orders` trait method, and `GetInferenceOrdersUseCase`. The repository query and the HTTP handler consume this contract.
+This note covers the application-layer contract built in `crates/application/src/lib.rs` — the validated types (`InferenceOrdersCursor`, `InferenceOrderStatus`, `InferenceOrderFlag`, `InferenceSide`, `InferenceOrdersQuery`, `InferenceOrderRow`, `InferenceOrdersPage`), the `InferenceReadRepository::list_inference_orders` trait method, and `GetInferenceOrdersUseCase`. The repository query and the HTTP handler consume this contract.
 
 ### Query resolution
 
@@ -558,14 +558,15 @@ This note covers the application-layer contract built in `crates/application/src
 2. `tokenContract` and `note` are mutually exclusive — see [§ tokenContract / note exclusion](#tokencontract--note-exclusion).
 3. `side`, if present, must be `BUY` or `SELL` (case-sensitive); blank → `MissingParameter` → `-1102` / 400; anything else → `InvalidParameter` → `-1130` / 400.
 4. `status` CSV — see [§ Status vocabulary](#status-vocabulary).
-5. `limit` — see [§ Page-size protocol](#page-size-protocol-1).
-6. `cursor` — see [§ Cursor format](#cursor-format).
+5. `flag` — one name, never with `note` or `tokenContract`; see [§ Flags filter](#flags-filter).
+6. `limit` — see [§ Page-size protocol](#page-size-protocol-1).
+7. `cursor` — see [§ Cursor format](#cursor-format).
 
 ### `tokenContract` / `note` exclusion
 
 `tokenContract` and `note` are both optional narrowing filters over the same book, and passing both at once is refused: `InvalidParameter` → `-1130` / 400, not `MissingParameter` — both values are present and well-formed, so nothing is missing; it is specifically the *combination* the endpoint cannot serve. Passing neither is fine (no token-contract / no note filter, side/status/cursor still apply).
 
-The reason is structural, not a validation preference: [`inference_orders_book_tc_idx`](data-schema.md#inference_orders) is keyed `(orderbook_address, token_contract, status, order_id DESC)` and [`inference_orders_book_note_idx`](data-schema.md#inference_orders) is keyed `(orderbook_address, note_address, is_buy, status, order_id DESC)`. Neither index carries the other's column, so a query naming both filters would have to pick one to seek on and apply the other as a heap residual — unbounded, because rows are never deleted and a TokenContract or note can accumulate history across many book cycles. Rather than serve a query whose cost is silently proportional to one filter's full history, the use case rejects the combination up front.
+The reason is structural, not a validation preference: [`inference_orders_book_tc_idx`](data-schema.md#inference_orders) is keyed `(orderbook_address, token_contract, status, order_id DESC)` and [`inference_orders_book_note_idx`](data-schema.md#inference_orders) is keyed `(orderbook_address, note_address, is_buy, status, order_id DESC)`. Neither index carries the other's column, so a query naming both filters would have to pick one to seek on and apply the other as a heap residual — unbounded, because rows are never deleted and a TokenContract or note can accumulate history across many book cycles. Rather than serve a query whose cost is silently proportional to one filter's full history, the use case rejects the combination up front. The same reasoning refuses `flag` combined with either filter; see [§ Flags filter](#flags-filter).
 
 A resting SELL whose `token_contract` is still NULL (the indexer has not yet learned it — see [`inference_orders.token_contract`](data-schema.md#inference_orders)) makes any TokenContract-filtered query over live SELLs suspect: the row might belong to the requested TokenContract and simply not say so yet. The repository probes [`inference_orders_live_sell_tc_null_idx`](data-schema.md#inference_orders) for such rows and fails closed with `MarketInconsistent` → 503 rather than silently omitting a row that could match — one of three arms of the fail-closed gate; see [§ Fail-closed gate](#fail-closed-gate).
 
@@ -622,13 +623,39 @@ It is never applied to a `tokenContract` lookup. That query asks whether the Tok
 
 The predicate is a heap residual on that one branch rather than an index term, and is cheap per row: every page column is read from the heap anyway, so the conjunct rides along with a fetch the query was already making. It does mean a book carrying many lapsed rows scans further to fill a page, and those rows stay until a match, `expireOrder` or the owner's cancel removes them.
 
+### Flags filter
+
+Every row reports the flags its order was placed with, read from [`inference_orders.flags`](data-schema.md#inference_orders) (the chain `uint8`, migration 0007). The public vocabulary is `InferenceOrderFlag`, one name per contract bit:
+
+| Name | Bit |
+| --- | --- |
+| `IOC` | `0x01` |
+| `FOK` | `0x02` |
+| `MARKET` | `0x04` |
+| `POST_ONLY` | `0x08` |
+| `TEE` | `0x10` |
+| `AON` | `0x20` |
+| `SUBSCRIPTION` | `0x40` |
+
+**Rendering.** The response maps each set bit to its name, in ascending bit order. `flags = 0` renders `[]`, and a NULL column renders `null`. A bit outside `SUPPORTED_FLAGS` (`0x7F`) cannot come from a contract this indexer decodes, because the book refuses such a placement. If one appears anyway, the row renders `flags: null` and the handler logs at `error!`: a partial list would misdescribe the order, while `null` already means "unknown".
+
+**Parsing.** `?flag=` is read through `non_blank_query` like every other filter on this endpoint, so a present-but-blank value is `MissingParameter` → `-1102` / 400. `InferenceOrderFlag::parse` accepts exactly one name, case-sensitive like `side`; anything else, a comma-separated list included, is `InvalidParameter` → `-1130` / 400. `flag` together with `note` or `tokenContract` is also `InvalidParameter` → `-1130` / 400, for the reason under **Index reliance** below. Absent means no flag filter.
+
+**Semantics.** A row matches when it carries the requested bit (`(flags & B) <> 0`), whatever else it carries. A NULL row never matches. Three-valued logic gives that result without a special case, and it is the honest answer, since the indexer cannot say whether that order carried the flag. The filter composes with `side`, `status`, `includeExpired` and the cursor. It never changes which branches exist; it adds one conjunct inside each one.
+
+**SQL shape.** The requested bit adds one predicate to every `page` branch: `and (flags & 32) <> 0`. The bit is written as a **literal**, never a bind parameter. Postgres can use a partial index only when it can prove that the query's `WHERE` implies the index predicate, and a `$n` hides the constant from that proof. With a bind parameter the branch would fall back to `inference_orders_book_side_status_idx`, and the bit would become a heap residual over the whole status group, which is unbounded for history. The value comes from the closed `InferenceOrderFlag` enum, never from request text, so the literal opens no injection surface. A unit test pins the emitted predicate to the index definition, the same way `liquidity_predicate_never_aggregates_and_matches_the_index_predicate` does for the liquidity probe.
+
+**Index reliance.** Each per-bit partial index [`inference_orders_flag_*_idx`](data-schema.md#inference_orders) has the same key as `inference_orders_book_side_status_idx`, `(orderbook_address, is_buy, status, order_id DESC)`, restricted to the rows carrying its bit. A flag branch therefore reads only matching rows, in cursor order, and stops at `LIMIT`: the bit is an index condition, never a residual. That is why the filter takes exactly one flag and refuses `note` and `tokenContract`. No index pins two bits, or a bit together with a note or a TokenContract, so either shape would seek on one filter and check the other on the heap, a walk proportional to that filter's full history. This is the reasoning behind the [`tokenContract` / `note` exclusion](#tokencontract--note-exclusion).
+
+`IOC`, `FOK` and `MARKET` never rest, so on a `LIVE` branch their index ranges are empty apart from the transient phantoms the sweep clears ([indexer.md § Non-resting orders](indexer.md#non-resting-orders)). Because `status` is part of the key, `flag=FOK&status=LIVE` costs one empty index probe per side.
+
 ### Page-size protocol
 
 Same contract as [`/api/v1/prediction/orders`](#apiv1predictionorders)'s page-size protocol: `limit` defaults to `ORDERS_DEFAULT_LIMIT` (100) when omitted; valid range is `[1, ORDERS_MAX_LIMIT]` (`[1, 500]`). Out of range (`0`, `> 500`, or a value that parses as a valid integer but does not fit `u16` — negative or above `u16::MAX`) → `MissingParameter` → `-1102` / 400, all folded into the same range check rather than split into a separate malformed-input case. A non-numeric `limit` is rejected earlier, at the HTTP boundary, as `InvalidParameter`.
 
 ### Cursor format
 
-The cursor is `InferenceOrdersCursor`, a validated `u128` — the `order_id` of the last row on the previous page. This differs from `/api/v1/prediction/orders`'s cursor, which is an opaque `placed_chain_order` string compared with SQL `<` on `text`: the inference cursor is fed into an `order_id::numeric` predicate against [`inference_orders_book_side_status_idx`](data-schema.md#inference_orders) / [`inference_orders_book_tc_idx`](data-schema.md#inference_orders) / [`inference_orders_book_note_idx`](data-schema.md#inference_orders) (`order_id` is `uint128` on chain, stored `numeric(78,0)`), so it is validated as an unsigned integer here rather than surfacing as a SQL cast error.
+The cursor is `InferenceOrdersCursor`, a validated `u128` — the `order_id` of the last row on the previous page. This differs from `/api/v1/prediction/orders`'s cursor, which is an opaque `placed_chain_order` string compared with SQL `<` on `text`: the inference cursor is fed into an `order_id::numeric` predicate against [`inference_orders_book_side_status_idx`](data-schema.md#inference_orders) / [`inference_orders_book_tc_idx`](data-schema.md#inference_orders) / [`inference_orders_book_note_idx`](data-schema.md#inference_orders) / the per-bit [`inference_orders_flag_*_idx`](data-schema.md#inference_orders) (`order_id` is `uint128` on chain, stored `numeric(78,0)`), so it is validated as an unsigned integer here rather than surfacing as a SQL cast error.
 
 `InferenceOrdersCursor::new` validates, in order:
 
@@ -653,7 +680,7 @@ The statement is `with mkt as (…), gate as (…), wm as (…), page as (…) s
 - `mkt` resolves visibility and precision: no row ⇒ the book is unknown or not yet reconciled ⇒ `InvalidMarketOrSymbol` → `-1121` / 404.
 - `gate` computes the three fail-closed booleans — see [§ Fail-closed gate](#fail-closed-gate).
 - `wm` computes `lastUpdateId` = `max(last_chain_order)` over the book.
-- `page` is a `UNION ALL` of one branch per `(is_buy, status)` pair the query admits. Each branch pins `orderbook_address`, `is_buy` and `status` to one stored value (`LIVE` is exactly `OPEN`, so no residual there either) and applies `token_contract` / `note_address` / the cursor as index conditions, then `ORDER BY order_id DESC LIMIT $fetch` — so every branch already returns its own candidates in cursor order and the outer merge sorts at most `branches × fetch` rows, never the book's full history.
+- `page` is a `UNION ALL` of one branch per `(is_buy, status)` pair the query admits. Each branch pins `orderbook_address`, `is_buy` and `status` to one stored value (`LIVE` is exactly `OPEN`, so no residual there either) and applies `token_contract` / `note_address` / the requested flag bit / the cursor as index conditions, then `ORDER BY order_id DESC LIMIT $fetch` — so every branch already returns its own candidates in cursor order and the outer merge sorts at most `branches × fetch` rows, never the book's full history.
 
 A `token_contract` filter admits SELL branches only — `token_contract` is non-null exclusively on SELL rows, so a `tokenContract` + `side=BUY` combination is provably empty:
 
@@ -672,7 +699,8 @@ Each branch's index depends on which filter is present:
 | --- | --- |
 | `token_contract` present | [`inference_orders_book_tc_idx`](data-schema.md#inference_orders) `(orderbook_address, token_contract, status, order_id DESC)` |
 | `note` present | [`inference_orders_book_note_idx`](data-schema.md#inference_orders) `(orderbook_address, note_address, is_buy, status, order_id DESC)` |
-| neither present | [`inference_orders_book_side_status_idx`](data-schema.md#inference_orders) `(orderbook_address, is_buy, status, order_id DESC)` |
+| `flag` present | that bit's [`inference_orders_flag_*_idx`](data-schema.md#inference_orders) `(orderbook_address, is_buy, status, order_id DESC) WHERE (flags & B) <> 0`; see [§ Flags filter](#flags-filter) |
+| none present | [`inference_orders_book_side_status_idx`](data-schema.md#inference_orders) `(orderbook_address, is_buy, status, order_id DESC)` |
 
 A cursor, when present, adds `order_id < $cursor::numeric` to every branch as a range condition trailing that branch's equality prefix, so the same index serves it.
 
@@ -700,6 +728,9 @@ Arm 1 (`tc_unknown`) logs at `error!` on **every** request that observes it, eva
 | `side` present and not `BUY` / `SELL` | `InvalidParameter` | `-1130` | 400 |
 | `status` CSV blank / whitespace-only | `MissingParameter` | `-1102` | 400 |
 | `status` CSV contains an unknown token | `InvalidParameter` | `-1130` | 400 |
+| `flag` blank / whitespace-only | `MissingParameter` | `-1102` | 400 |
+| `flag` is not exactly one known name | `InvalidParameter` | `-1130` | 400 |
+| `flag` combined with `note` or `tokenContract` | `InvalidParameter` | `-1130` | 400 |
 | `includeExpired` present but blank | `MissingParameter` | `-1102` | 400 |
 | `includeExpired` present and not exactly `true` / `false` | `InvalidParameter` | `-1130` | 400 |
 | `limit` out of `[1, 500]` (including values outside `u16` range) | `MissingParameter` | `-1102` | 400 |
