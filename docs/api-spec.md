@@ -31,8 +31,10 @@
     - [Inference Depth](#inference-depth)
     - [Inference Orders](#inference-orders)
       - [Lapsed orders](#lapsed-orders)
+      - [Order flags](#order-flags)
     - [Inference Trades](#inference-trades)
   - [Account Endpoints](#account-endpoints)
+    - [Register Account](#register-account)
     - [Account Balance](#account-balance)
     - [Market Outcome Balances](#market-outcome-balances)
   - [Prediction Position Endpoints](#prediction-position-endpoints)
@@ -992,7 +994,7 @@ Errors:
 GET /api/v1/inference/orders
 ```
 
-Orders resting in, or historic to, one model's book — the order-level counterpart to [`/api/v1/inference/depth`](#inference-depth), which shows only aggregated price levels.
+Orders resting in, or historic to, one model's book — the order-level counterpart to [`/api/v1/inference/depth`](#inference-depth), which shows only aggregated price levels. Each order reports the [flags](#order-flags) it was placed with (`FOK`, `AON`, `TEE`, …) and can be filtered by one of those that can rest in the book.
 
 Unlike [Inference Markets](#inference-markets) and [Inference Depth](#inference-depth), which collapse a present-but-blank query parameter to "absent", this endpoint rejects one with `-1102`. A blank `tokenContract=` silently becoming "no filter" would return the whole book and read as a confident answer to a question nobody asked; the caller must omit the parameter, not send it empty.
 
@@ -1005,6 +1007,7 @@ Query parameters:
 | `note` | STRING | NO | Exact owning PrivateNote address. Mutually exclusive with `tokenContract`. |
 | `side` | STRING | NO | `BUY` or `SELL`. |
 | `status` | STRING | NO | Comma-separated: `LIVE`, `FILLED`, `CANCELLED`, `EXPIRED`. Tokens are trimmed and de-duplicated. Default: all statuses. `LIVE` means the order is in the book; `EXPIRED` means the chain confirmed the book dropped it. Whether a `LIVE` row has passed its deadline is a separate question — see [`includeExpired`](#lapsed-orders). |
+| `flag` | STRING | NO | One [order flag](#order-flags) that can rest in the book: `POST_ONLY`, `TEE`, `AON` or `SUBSCRIPTION`. Returns only orders that carry it; other flags may be set too. An order whose flags the indexer does not know (`flags: null`) never matches. Cannot be combined with `note` or `tokenContract`. Send it once: a repeated `flag`, or `flags` (the response field's name, not a parameter), is rejected rather than ignored. Default: no flag filter. |
 | `limit` | INT | NO | Page size. Default: `100`. Range: `[1, 500]`; out-of-range values are rejected, not clamped. |
 | `cursor` | STRING | NO | Keyset cursor: the decimal `orderId` of the last row on the previous page, taken verbatim from a previous call's `nextCursor`. |
 | `includeExpired` | BOOLEAN | NO | Include `LIVE` rows whose `deadline` has already passed. Default `false`. Exactly `true` or `false`; any other value is `-1130`. A `tokenContract` query returns such rows either way. See [Lapsed orders](#lapsed-orders). |
@@ -1027,6 +1030,25 @@ By default it is `false`, hiding those rows. `includeExpired=true` returns them.
 
 [`/api/v1/inference/depth`](#inference-depth) and the [`?liquidity=` filter](#liquidity-filter) apply the same deadline rule with no opt-out: those describe what can be traded against, and a lapsed order cannot.
 
+#### Order flags
+
+Every order carries the flags it was placed with: execution instructions and deal properties, the chain's `uint8 flags`, published by name.
+
+| Flag | Bit | Side | Can rest | Meaning |
+| --- | --- | --- | --- | --- |
+| `IOC` | `0x01` | BUY, SELL | no | Immediate-or-cancel: matches what it can on placement; the remainder is refunded. |
+| `FOK` | `0x02` | BUY, SELL | no | Fill-or-kill: fills in full on placement, or is refused before it receives an `orderId`. A refused `FOK` therefore never appears in this endpoint. |
+| `MARKET` | `0x04` | BUY | no | No price limit: matches on placement; the remainder is refunded. |
+| `POST_ONLY` | `0x08` | BUY, SELL | yes | Must rest: refused before it receives an `orderId` if it would cross. |
+| `TEE` | `0x10` | BUY, SELL | yes | On a SELL, the seller offers a TEE endpoint. On a BUY, the buyer requires one, and the order matches only a SELL that carries `TEE`. Self-asserted: the book does not verify it. |
+| `AON` | `0x20` | BUY, SELL | yes | All-or-none: fills only in full, and only against a single counterparty. Unlike `FOK`, it may rest and wait for a counterparty large enough. |
+| `SUBSCRIPTION` | `0x40` | BUY, SELL | yes | A one-month subscription settled weekly, instead of a pay-per-tick purchase. Always set together with `AON`. A subscription BUY matches only a subscription SELL, and vice versa. |
+
+- `flags` lists the names in the bit order above. `[]` is a plain limit order: it matches what it can, then rests the remainder until it is filled, cancelled, or reaches its `deadline`.
+- `null` means the indexer does not know the order's flags. That is an order placed before the indexer started recording flags: while it is still in the book, the reconciler recovers its flags on its next sweep, and one that has already left the book stays `null`. An order of the retired subscription type (books at contract 4.0.30 or earlier) also stays `null`, because its book predates the `AON` and `SUBSCRIPTION` bits and cannot report them. A `flag` filter never matches a `null` row.
+- `IOC`, `FOK` and `MARKET` never rest, so a `LIVE` order does not carry them except transiently (see the notes below). They appear in `flags`, but the `flag` filter does not accept them (`-1130`): it covers the four flags that can rest.
+- The book refuses any bit outside `0x7F`, so this list is exhaustive for every contract version this API serves.
+
 Response:
 
 ```json
@@ -1042,6 +1064,7 @@ Response:
       "tokenContract": "0:tc-addr...",
       "note": "0:note-addr...",
       "side": "SELL",
+      "flags": ["TEE", "AON"],
       "price": "1000",
       "ticks": "40",
       "ticksInitial": "120",
@@ -1068,6 +1091,7 @@ Response fields:
 | `tokenContract` | STRING \| null | `null` on BUY orders and on rows whose TokenContract is not known to the indexer. A query filtering on `tokenContract` is refused (see `-1500` below) while any live SELL of the book is in that state, so `null` here never hides a match. |
 | `note` | STRING \| null | Owning PrivateNote address. |
 | `side` | ENUM | `BUY` or `SELL`. |
+| `flags` | ARRAY \| null | [Order flags](#order-flags) the order was placed with, by name, in bit order. `[]` for a plain limit order. `null` when the indexer does not know them. |
 | `price` | DECIMAL | Price per tick, in `SHELL`. |
 | `ticks` | DECIMAL | The **resting remainder** — ticks still available at this order. Compare directly against a level in [`/api/v1/inference/depth`](#inference-depth), which uses the same name (`ticks`) for the same quantity. |
 | `ticksInitial` | DECIMAL | The size the order was placed with. On chain, `InferenceOrderPlaced.ticks` is this initial size — the same field name carries a different number in the chain event than it does in this response's `ticks`. |
@@ -1081,10 +1105,13 @@ Errors:
 | Condition | Code | HTTP |
 | --- | --- | --- |
 | `inferenceOrderBookAddress` missing or blank | `-1102` | 400 |
-| `tokenContract`, `note`, `side`, `status`, `cursor`, or `includeExpired` present but blank | `-1102` | 400 |
+| `tokenContract`, `note`, `side`, `status`, `flag`, `cursor`, or `includeExpired` present but blank | `-1102` | 400 |
 | `tokenContract` and `note` both supplied | `-1130` | 400 |
 | `side` present and not `BUY` / `SELL` | `-1130` | 400 |
 | `status` contains an unknown token | `-1130` | 400 |
+| `flag` is not exactly one of `POST_ONLY`, `TEE`, `AON`, `SUBSCRIPTION` (an `IOC`, `FOK` or `MARKET` included) | `-1130` | 400 |
+| `flag` combined with `note` or `tokenContract` | `-1130` | 400 |
+| `flag` sent more than once, or `flags` sent | `-1130` | 400 |
 | `limit` present but not an integer | `-1130` | 400 |
 | `limit` outside `[1, 500]` | `-1102` | 400 |
 | `cursor` present but not all decimal digits, or oversized | `-1130` | 400 |
@@ -1095,13 +1122,13 @@ Errors:
 Notes:
 
 - `LIVE` means the order is in the book: placed, not cancelled, not fully filled, not yet expired by the chain. `InferenceOrderCancelled` moves an order to `CANCELLED`; a fill moves it to `FILLED` once no ticks remain, and a SELL leaves `LIVE` on its first fill because one SELL offer is one deal.
-- `status=LIVE` can transiently include an order that was placed but never rested — a `POST_ONLY` placement rejected for crossing, a failed `FOK`, or a partially matched BUY `MARKET`/`IOC` whose remainder was refunded on chain without an order-bearing event. The reconciler's probe clears these on its next sweep. The error runs in the safe direction: such a row reports its TokenContract as *in use*, never as free.
+- `status=LIVE` can transiently include an order that was placed but never rested: an `IOC` or `MARKET` order whose unmatched remainder the book refunded, or a BUY's 1-tick remainder. The book reports the refund as `InferenceRefunded`, which the indexer does not project yet, so the row stays `LIVE` until the reconciler's next sweep clears it. The error runs in the safe direction: such a row reports its TokenContract as *in use*, never as free. A `LIVE` row whose `flags` include `IOC`, `FOK` or `MARKET` is always transient in this way, because such an order never rests.
 - `lastUpdateId` orders chain progress only. The reconciler mutates rows without advancing it, so two responses sharing a `lastUpdateId` are not guaranteed identical.
 - A `tokenContract` query that scopes live SELLs returns `-1500` (HTTP 503) while the book holds a live SELL whose TokenContract the indexer does not know. Deliberate: an empty page would otherwise be indistinguishable from "not in use", and 503 tells the client to retry where 404 would tell it to stop.
 - `deadline: null` means the indexer knows of no deadline. On a book at contract 4.0.31 or later that is a BUY placed with `deadline == 0` — good-till-cancel; every SELL offer there carries a deadline. A book's version is the `contractVersion` that [`/api/v1/inference/markets`](#inference-markets) and [`/api/v1/inference/depth`](#inference-depth) report. A book at 4.0.30 or earlier adds two more sources: a SELL, which then carried no deadline and never lapsed, and a row from the retired subscription order type, whose deadline the chain held but the `InferenceSubscriptionPlaced` event never published — such a row is born `null` and gains a value only when the sweep probes it. Likewise `createdAt` / `updatedAt` may be `null`.
 - `ticks` is the **resting remainder**; `ticksInitial` is the placed size. `InferenceOrderPlaced.ticks` on chain is the initial size, so the same field name carries different numbers in the event and in this response. The `ticks` name follows [`/api/v1/inference/depth`](#inference-depth), which already publishes `[pricePerTick, ticks]` for the ticks resting at a level — a client comparing an order against a depth level finds one name for one quantity.
 - `deadline` is a **decimal string** while `createdAt`, `updatedAt`, and `serverTime` are JSON numbers, though all four are unix seconds. `deadline` is a chain `uint64` reproduced verbatim, and can exceed both `i64` and JSON's exact-integer range; the other three are database timestamps. This follows the repo-wide rule that chain-native unsigned integers (`price`, `ticks`, `lastUpdateId`) serialize as strings.
-- `note` and `tokenContract` cannot be combined: `-1130`, HTTP 400. Both are present, so nothing is missing — the combination is what cannot be served, because no index pins both and the pair would scan one filter's whole history. This is a different relation from [`/api/v1/prediction/orders`](#orders), where `predictionMarketAddress` and `symbol` must be given together or not at all, and a half-specified pair is `-1102`.
+- `note` and `tokenContract` cannot be combined, and `flag` cannot be combined with either: `-1130`, HTTP 400. Both are present, so nothing is missing — the combination is what cannot be served, because no index pins both and the pair would scan one filter's whole history. This is a different relation from [`/api/v1/prediction/orders`](#orders), where `predictionMarketAddress` and `symbol` must be given together or not at all, and a half-specified pair is `-1102`.
 
 ### Inference Trades
 

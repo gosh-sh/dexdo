@@ -494,7 +494,7 @@ async fn token_contract_event_seeds_skeleton_then_filled_enriches() {
                     "ticks": "10",
                     "note": "0:seller",
                     "tokenContract": tc,
-                    "deadline": "0"
+                    "deadline": "0", "flags": "0"
                 }),
             ),
             &node(ob, "co-op-sell"),
@@ -515,7 +515,7 @@ async fn token_contract_event_seeds_skeleton_then_filled_enriches() {
                     "ticks": "10",
                     "note": "0:buyer",
                     "tokenContract": tc,
-                    "deadline": "0"
+                    "deadline": "0", "flags": "0"
                 }),
             ),
             &node(ob, "co-op-buy"),
@@ -908,7 +908,7 @@ async fn a_fresh_sell_offer_ends_a_funded_deals_cycle() {
                 "ticks": "10",
                 "note": "0:seller",
                 "tokenContract": tc,
-                "deadline": "0"
+                "deadline": "0", "flags": "0"
             }),
         ),
         &node(ob, "co-9"),
@@ -971,7 +971,7 @@ async fn the_offer_that_produced_the_match_does_not_end_its_cycle() {
                 "ticks": "10",
                 "note": "0:seller",
                 "tokenContract": tc,
-                "deadline": "0"
+                "deadline": "0", "flags": "0"
             }),
         ),
         &node(ob, "co-0"),

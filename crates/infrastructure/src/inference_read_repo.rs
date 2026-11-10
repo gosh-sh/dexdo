@@ -9,6 +9,7 @@ use anyhow::Context;
 use async_trait::async_trait;
 use dodex_application::InferenceMarketsListing;
 use dodex_application::InferenceMarketsRequest;
+use dodex_application::InferenceOrderFlag;
 use dodex_application::InferenceOrderRow;
 use dodex_application::InferenceOrderStatus;
 use dodex_application::InferenceOrdersPage;
@@ -693,6 +694,7 @@ struct InferenceOrderQueryRow {
     amount_initial: Option<String>,
     deadline: Option<String>,
     status: Option<String>,
+    flags: Option<i16>,
     /// Unix seconds, extracted in SQL: the application layer has no chrono dependency and
     /// this API returns unix seconds throughout.
     created_at_unix: Option<i64>,
@@ -731,8 +733,14 @@ fn resolve_sides(query: &InferenceOrdersQuery) -> Vec<bool> {
 
 /// Columns every page branch projects, in the order `InferenceOrderQueryRow` reads.
 const PAGE_COLUMNS: &str = "order_id, token_contract, note_address, is_buy, price, \
-                            amount_remaining, amount_initial, deadline, status, \
+                            amount_remaining, amount_initial, deadline, status, flags, \
                             chain_created_at, chain_updated_at";
+
+/// The `?flag=` conjunct. A literal, not a bind: Postgres matches a partial index only
+/// against a constant. Must equal the migration 0008 predicate; a test pins it.
+fn flag_predicate(flag: InferenceOrderFlag) -> String {
+    format!(" and (flags & {}) <> 0", flag.bit())
+}
 
 /// One statement: visibility gate, fail-closed gate, watermark and page share an MVCC
 /// snapshot. The page is a UNION ALL of branches that each pin `is_buy` and `status`, so
@@ -834,6 +842,10 @@ fn build_snapshot_query<'a>(
                     b.push(" and note_address = ");
                     b.push_bind(note);
                 }
+                // Never combined with tc / note, so this rides the bit's partial index.
+                if let Some(flag) = q.flag {
+                    b.push(flag_predicate(flag));
+                }
                 // Expiry is its own filter, composed with the others above rather than
                 // folded into the status. `status` answers "is the order in the book";
                 // this answers "can it still be matched". The book will not settle
@@ -877,7 +889,7 @@ fn build_snapshot_query<'a>(
         ") select p.order_id::text as order_id, p.token_contract, p.note_address, p.is_buy, \
                   p.price::text as price, p.amount_remaining::text as amount_remaining, \
                   p.amount_initial::text as amount_initial, p.deadline::text as deadline, \
-                  p.status, \
+                  p.status, p.flags, \
                   extract(epoch from p.chain_created_at)::bigint as created_at_unix, \
                   extract(epoch from p.chain_updated_at)::bigint as updated_at_unix, \
                   wm.last_update_id, gate.tc_unknown, gate.unprojected, gate.capture_stale, \
@@ -1014,6 +1026,7 @@ async fn list_inference_orders_impl(
             )?,
             deadline: r.deadline.clone(),
             status: public_status(r.status.as_deref().ok_or_else(|| corrupt("status"))?)?,
+            flags: r.flags,
             created_at: r.created_at_unix,
             updated_at: r.updated_at_unix,
         });
@@ -1111,5 +1124,65 @@ mod tests {
             "",
             "no ?liquidity= must not touch the order book at all",
         );
+    }
+
+    /// Migration 0008 as `sqlx::migrate!` applies it, read at compile time.
+    const FLAG_INDEX_MIGRATION: &str =
+        include_str!("../../../migrations/0008_inference_orders_flag_idx.sql");
+
+    #[test]
+    fn flag_predicate_is_a_literal_and_spells_its_partial_index_predicate() {
+        for flag in InferenceOrderFlag::ALL {
+            let name =
+                format!("inference_orders_flag_{}_idx", flag.as_public().to_ascii_lowercase());
+            if !flag.can_rest() {
+                // Taker-only flags are not filterable, so no index.
+                assert!(!FLAG_INDEX_MIGRATION.contains(&name), "{name} must not exist");
+                continue;
+            }
+            let predicate = flag_predicate(flag);
+            // A `$n` would defeat the partial index.
+            assert!(!predicate.contains('$'), "the bit must be a literal; sql={predicate}");
+            let condition = predicate.strip_prefix(" and ").expect("appended to a WHERE");
+            let index = format!(
+                "create index inference_orders_flag_{}_idx\n    \
+                 on inference_orders (orderbook_address, is_buy, status, order_id desc)\n    \
+                 where {condition};",
+                flag.as_public().to_ascii_lowercase(),
+            );
+            assert!(
+                FLAG_INDEX_MIGRATION.contains(&index),
+                "migration 0008 must define exactly this index for {flag:?}:\n{index}",
+            );
+        }
+    }
+
+    fn orders_query(flag: Option<InferenceOrderFlag>) -> InferenceOrdersQuery {
+        InferenceOrdersQuery {
+            orderbook_address: "0:ob".to_string(),
+            token_contract: None,
+            note: None,
+            side: None,
+            flag,
+            statuses: dodex_application::InferenceOrderStatusSet::all(),
+            limit: dodex_application::OrdersLimit::DEFAULT,
+            cursor: None,
+            now: 0,
+            include_expired: false,
+        }
+    }
+
+    #[test]
+    fn a_flag_filter_adds_its_literal_to_every_page_branch() {
+        let q = orders_query(Some(InferenceOrderFlag::Aon));
+        let built = build_snapshot_query(&q, 101);
+        let sql = built.sql();
+        // 2 sides × 4 statuses: every branch must carry the bit.
+        assert_eq!(sql.matches(" union all ").count() + 1, 8, "sql={sql}");
+        assert_eq!(sql.matches(" and (flags & 32) <> 0").count(), 8, "sql={sql}");
+
+        let unfiltered = orders_query(None);
+        let built = build_snapshot_query(&unfiltered, 101);
+        assert!(!built.sql().contains("flags &"), "no ?flag= must add no bit test");
     }
 }

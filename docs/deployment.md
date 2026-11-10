@@ -531,7 +531,11 @@ git pull
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
 
-New migrations in `migrations/` apply automatically on the next start.
+New migrations in `migrations/` apply automatically on the next start — of the
+indexer, or of the api when `auth.seed_accounts` is on. When a release's api
+reads a column that one of its migrations adds, the [CHANGELOG](../CHANGELOG.md)
+says so: upgrade the indexer first by naming its service in the command above,
+then run it again for the rest, so the api never starts against the old schema.
 
 ## Troubleshooting
 

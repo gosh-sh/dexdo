@@ -2,6 +2,20 @@
 
 All notable changes to DEX.DO are recorded here. Entries are date-based, newest first.
 
+## [2026-11-09]
+
+### Added
+
+- **`flags` on every row of `GET /api/v1/inference/orders`.** The flags the order was placed with, by name and in bit order: `IOC`, `FOK`, `MARKET`, `POST_ONLY`, `TEE`, `AON`, `SUBSCRIPTION`. `[]` is a plain limit order. `null` means the indexer does not know them: an order placed before this release that left the book before the reconciler swept it, or one of the retired subscription type, whose book predates the `AON` / `SUBSCRIPTION` bits. `IOC`, `FOK` and `MARKET` never rest, so a `LIVE` order carries them only for the moment before the reconciler closes it.
+- **`?flag=` on the same endpoint.** Takes one of the four flags that can rest in the book — `POST_ONLY`, `TEE`, `AON`, `SUBSCRIPTION` — and returns only orders that carry it; other flags may be set too, and `null` never matches. Exactly one name, case-sensitive. These are all `-1130 / 400`: an unknown name, a comma-separated list, `IOC` / `FOK` / `MARKET` (they never rest, so they have no index), a repeated `flag`, and `flags=` (the response field's name, which is not a parameter). A blank value is `-1102 / 400`. It cannot be combined with `note` or `tokenContract` (`-1130 / 400`), for the same reason `note` and `tokenContract` cannot be combined: no index serves the pair.
+- **Migrations `0007_inference_orders_flags` and `0008_inference_orders_flag_idx` — run them, and upgrade the indexer before the api.** 0007 adds the nullable `inference_orders.flags` (`smallint`, the chain's `uint8`); it is a catalog-only change and locks the table for milliseconds. 0008 adds four partial indexes `inference_orders_flag_{post_only,tee,aon,subscription}_idx` on `(orderbook_address, is_buy, status, order_id DESC)`, one per flag that can rest, which back `?flag=`. They are not built `CONCURRENTLY`: writers to `inference_orders` wait for the build, readers do not. Existing rows start `NULL`. Over its next sweep cycle the reconciler fills those still in the book from `getOrder`, at no extra chain calls; rows that already left the book stay `null`.
+  - **Order matters.** Only the indexer applies migrations (the api does too, but only with `auth.seed_accounts` on). The new api reads `flags`, so against a database without 0007 every `GET /api/v1/inference/orders` fails with `500`. Upgrade the indexer first — the [Upgrades](docs/deployment.md#upgrades) command with the `indexer` service named, then the same command again for the rest — and the window does not open.
+  - **Do not run an old indexer against the migrated database.** Placements it projects are stored with `flags` `NULL`. The sweep repairs those still in the book, but one that fills or is cancelled first keeps `flags: null` for good. This happens only if something else migrates while the old indexer is still running, such as an api with `auth.seed_accounts` on that starts first.
+
+### Fixed
+
+- **`inference_orders.is_subscription` follows the `SUBSCRIPTION` flag.** An order placed with bit `0x40` used to be stored as `false`. New placements now set it from the flag, and the reconciler's flag repair sets it on live orders placed before. No endpoint reads the column.
+
 ## [2026-09-29]
 
 ### Added
