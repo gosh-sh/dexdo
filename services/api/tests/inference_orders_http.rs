@@ -367,3 +367,114 @@ async fn note_and_token_contract_together_is_1130() {
     let body: Value = resp.take_json().await.expect("json");
     assert_eq!(body["code"], -1130);
 }
+
+async fn set_flags(pool: &PgPool, ob: &str, id: i64, flags: Option<i16>) {
+    sqlx::query("update inference_orders set flags = $3 where orderbook_address=$1 and order_id=$2::numeric")
+        .bind(ob)
+        .bind(id)
+        .bind(flags)
+        .execute(pool)
+        .await
+        .expect("set flags");
+}
+
+#[tokio::test]
+async fn flags_render_by_name_in_bit_order_with_null_for_unknown() {
+    let Some((service, pool, _kek, _pn)) = common::setup().await else { return };
+    seed_at_head(&pool).await;
+    let ob = "0:orders-flags";
+    purge(&pool, ob).await;
+    seed_market(&pool, ob).await;
+    for (id, flags) in [(1, Some(0x30)), (2, Some(0)), (3, None), (4, Some(0x80))] {
+        seed_order(&pool, ob, id, true, "OPEN", None).await;
+        set_flags(&pool, ob, id, flags).await;
+    }
+
+    let mut resp = TestClient::get(format!(
+        "http://test/api/v1/inference/orders?inferenceOrderBookAddress={ob}"
+    ))
+    .send(&service)
+    .await;
+    assert_eq!(resp.status_code, Some(StatusCode::OK));
+    let body: Value = resp.take_json().await.expect("json");
+    let flags: Vec<(String, Value)> = body["orders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| (o["orderId"].as_str().unwrap().to_string(), o["flags"].clone()))
+        .collect();
+    assert_eq!(
+        flags,
+        vec![
+            // A bit outside SUPPORTED_FLAGS is served as unknown, not as a partial list.
+            ("4".to_string(), Value::Null),
+            ("3".to_string(), Value::Null),
+            ("2".to_string(), serde_json::json!([])),
+            ("1".to_string(), serde_json::json!(["TEE", "AON"])),
+        ],
+    );
+
+    purge(&pool, ob).await;
+}
+
+#[tokio::test]
+async fn flag_filter_selects_by_one_flag() {
+    let Some((service, pool, _kek, _pn)) = common::setup().await else { return };
+    seed_at_head(&pool).await;
+    let ob = "0:orders-flag-filter";
+    purge(&pool, ob).await;
+    seed_market(&pool, ob).await;
+    for (id, flags) in [(1, Some(0x20)), (2, Some(0x10)), (3, Some(0x60)), (4, None)] {
+        seed_order(&pool, ob, id, true, "OPEN", None).await;
+        set_flags(&pool, ob, id, flags).await;
+    }
+
+    let mut resp = TestClient::get(format!(
+        "http://test/api/v1/inference/orders?inferenceOrderBookAddress={ob}&flag=AON&status=LIVE"
+    ))
+    .send(&service)
+    .await;
+    assert_eq!(resp.status_code, Some(StatusCode::OK));
+    let body: OrdersBody = resp.take_json().await.expect("orders body");
+    let ids: Vec<&str> = body.orders.iter().map(|o| o.order_id.as_str()).collect();
+    assert_eq!(ids, ["3", "1"]);
+
+    purge(&pool, ob).await;
+}
+
+#[tokio::test]
+async fn flag_filter_rejects_blank_unknown_lists_repeats_and_note_or_token_contract() {
+    let Some((service, pool, _kek, _pn)) = common::setup().await else { return };
+    seed_at_head(&pool).await;
+    let ob = "0:orders-flag-errors";
+    purge(&pool, ob).await;
+    seed_market(&pool, ob).await;
+
+    for (query, code) in [
+        ("flag=", -1102),
+        ("flag=aon", -1130),
+        ("flag=AON,TEE", -1130),
+        ("flag=GTC", -1130),
+        // Taker-only flags never rest, so they are not filterable.
+        ("flag=IOC", -1130),
+        ("flag=FOK", -1130),
+        ("flag=MARKET", -1130),
+        ("flag=AON&note=0:n", -1130),
+        ("flag=AON&tokenContract=0:tc", -1130),
+        // Near-misses that would otherwise be ignored or truncated without an error.
+        ("flags=AON", -1130),
+        ("flags=", -1130),
+        ("flag=AON&flag=TEE", -1130),
+    ] {
+        let mut resp = TestClient::get(format!(
+            "http://test/api/v1/inference/orders?inferenceOrderBookAddress={ob}&{query}"
+        ))
+        .send(&service)
+        .await;
+        assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST), "{query}");
+        let body: Value = resp.take_json().await.expect("json");
+        assert_eq!(body["code"], code, "{query}");
+    }
+
+    purge(&pool, ob).await;
+}

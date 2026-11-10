@@ -22,6 +22,7 @@ use tracing::warn;
 
 use crate::decoder::Decoder;
 use crate::graphql::GraphqlClient;
+use crate::inference_projectors::flags_field;
 use crate::inference_projectors::non_zero_address;
 use crate::inference_projectors::non_zero_uint;
 use crate::projectors::field_str;
@@ -93,6 +94,15 @@ pub struct InferenceReconciler {
     // indexer_inference_reconcile_failures counter. Defaults to a standalone
     // atomic so tests and standalone construction work without wiring.
     reconcile_failures: Arc<AtomicU64>,
+}
+
+/// Columns the sweep recovered from `getOrder`; `None` leaves a column as is.
+#[derive(Debug, Clone)]
+pub struct OrderFieldRepair {
+    pub order_id: String,
+    pub token_contract: Option<String>,
+    pub deadline: Option<String>,
+    pub flags: Option<i16>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -572,14 +582,17 @@ impl InferenceReconciler {
         // against a fresh BOC.
         //
         let lower = prev_cursor.clone().unwrap_or_else(|| "-1".to_string());
-        // The two `is null` flags ride along so the repair below can skip a row that needs
+        // The three `is null` flags ride along so the repair below can skip a row that needs
         // nothing. Asking the database per order instead would cost one round trip per open
         // SELL — at ~95 ms per round trip to the deployed database, a book with a few
         // hundred orders would spend minutes in a single step.
-        let ids: Vec<(String, bool, bool)> = sqlx::query_as(
+        // Retired subscriptions are excluded from `flags_missing`: their book predates
+        // AON / SUBSCRIPTION.
+        let ids: Vec<(String, bool, bool, bool)> = sqlx::query_as(
             r#"select order_id::text,
                       token_contract is null as tc_missing,
-                      deadline is null as deadline_missing
+                      deadline is null as deadline_missing,
+                      (flags is null and not is_subscription) as flags_missing
                  from inference_orders
                 where orderbook_address=$1 and status='OPEN'
                   and order_id > $2::numeric
@@ -597,17 +610,16 @@ impl InferenceReconciler {
 
         // Probe each via getOrder. amount == 0 is a phantom (placed but never rested, or
         // a taker remainder refunded on chain without an event). A live order is also an
-        // opportunity: the getter carries tokenContract and deadline, so a row missing
-        // either is repaired here at no extra chain cost. The two repairs are independent
-        // — a BUY's TC is zero by design, and a subscription's deadline exists only on
-        // chain.
+        // opportunity: the getter carries tokenContract, deadline and flags, so a row
+        // missing any of them is repaired here at no extra chain cost. The repairs are
+        // independent.
         let mut to_cancel: Vec<String> = Vec::new();
         // Repairs are accumulated, not applied per order. One UPDATE per row would cost a
         // round trip each — and every subscription is born with a NULL deadline, so a fresh
         // book needs the whole batch repaired. At ~95 ms per round trip, a 50-row batch
         // would spend ~5 s here and stall every book behind it.
-        let mut repairs: Vec<(String, Option<String>, Option<String>)> = Vec::new();
-        for (id, tc_missing, deadline_missing) in &ids {
+        let mut repairs: Vec<OrderFieldRepair> = Vec::new();
+        for (id, tc_missing, deadline_missing, flags_missing) in &ids {
             let o = self.call_getter(boc, "getOrder", &json!({ "id": id }))?;
             let amount = uint_field_to_decimal(&o, "amount")?;
             if amount == "0" {
@@ -615,7 +627,7 @@ impl InferenceReconciler {
                 continue;
             }
             // A healthy row needs nothing: it never reaches the database.
-            if !tc_missing && !deadline_missing {
+            if !tc_missing && !deadline_missing && !flags_missing {
                 continue;
             }
             let tc: Option<String> = if *tc_missing {
@@ -650,8 +662,30 @@ impl InferenceReconciler {
             } else {
                 None
             };
-            if tc.is_some() || deadline.is_some() {
-                repairs.push((id.clone(), tc, deadline));
+            // `0` is stored too: a plain limit order, not an absent value.
+            let flags: Option<i16> = if *flags_missing {
+                match flags_field(&o) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        warn!(
+                            orderbook_address = ob,
+                            order_id = %id,
+                            error = %e,
+                            "getOrder flags failed to decode during sweep repair; ABI drift?",
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            if tc.is_some() || deadline.is_some() || flags.is_some() {
+                repairs.push(OrderFieldRepair {
+                    order_id: id.clone(),
+                    token_contract: tc,
+                    deadline,
+                    flags,
+                });
             }
         }
         if !to_cancel.is_empty() {
@@ -693,7 +727,7 @@ impl InferenceReconciler {
         let new_cursor: Option<String> = if cycle_complete {
             None
         } else {
-            ids.last().map(|(id, _, _)| id.clone()).or_else(|| prev_cursor.clone())
+            ids.last().map(|(id, _, _, _)| id.clone()).or_else(|| prev_cursor.clone())
         };
 
         if discovery {
@@ -737,47 +771,60 @@ impl InferenceReconciler {
         Ok(())
     }
 
-    /// Fill in `token_contract` / `deadline` for live orders from a chain getter, in one
-    /// statement.
+    /// Fill in `token_contract` / `deadline` / `flags` for live orders from a chain getter,
+    /// in one statement.
     ///
     /// Each column is applied only when the row is missing it AND the getter supplied one,
     /// so a row whose remaining NULL is intentional is never rewritten — a bare
     /// `IS NULL` predicate stays true forever on healthy rows (a BUY's TC, a good-till-cancel
-    /// BUY's deadline) and would churn `updated_at` every cycle. Returns the number of rows
-    /// changed, for logging only.
+    /// BUY's deadline) and would churn `updated_at` every cycle. `flags` also skips
+    /// `is_subscription` rows and sets `is_subscription` from bit `0x40`. Returns the number
+    /// of rows changed, for logging only.
     pub async fn repair_order_fields(
         &self,
         ob: &str,
-        repairs: &[(String, Option<String>, Option<String>)],
+        repairs: &[OrderFieldRepair],
     ) -> anyhow::Result<u64> {
         if repairs.is_empty() {
             return Ok(0);
         }
-        let ids: Vec<String> = repairs.iter().map(|(id, _, _)| id.clone()).collect();
-        let tcs: Vec<Option<String>> = repairs.iter().map(|(_, tc, _)| tc.clone()).collect();
-        let deadlines: Vec<Option<String>> = repairs.iter().map(|(_, _, d)| d.clone()).collect();
+        let ids: Vec<String> = repairs.iter().map(|r| r.order_id.clone()).collect();
+        let tcs: Vec<Option<String>> = repairs.iter().map(|r| r.token_contract.clone()).collect();
+        let deadlines: Vec<Option<String>> = repairs.iter().map(|r| r.deadline.clone()).collect();
+        let flags: Vec<Option<i16>> = repairs.iter().map(|r| r.flags).collect();
 
-        // Every array binds as `text[]` — that is what sqlx sends for `Vec<String>` and
+        // The string arrays bind as `text[]` — that is what sqlx sends for `Vec<String>` and
         // `Vec<Option<String>>` — and the two numeric columns are cast per element at the
         // point of use. Declaring the parameter `$2::numeric[]` instead would lean on
         // Postgres's array-level `text[] -> numeric[]` coercion, which is a different code
         // path for no gain here.
+        // `flags` binds as `smallint[]`. SET reads the pre-UPDATE row, so both CASEs test
+        // the same `o.flags is null`.
         let res = sqlx::query(
             r#"update inference_orders o
                   set token_contract = coalesce(o.token_contract, r.tc),
                       deadline = coalesce(o.deadline, r.deadline::numeric),
+                      flags = case when o.flags is null and not o.is_subscription
+                                   then r.flags else o.flags end,
+                      is_subscription = case when o.flags is null and not o.is_subscription
+                                                  and r.flags is not null
+                                             then (r.flags & 64) <> 0
+                                             else o.is_subscription end,
                       updated_at = now()
-                 from unnest($2::text[], $3::text[], $4::text[]) as r(order_id, tc, deadline)
+                 from unnest($2::text[], $3::text[], $4::text[], $5::smallint[])
+                      as r(order_id, tc, deadline, flags)
                 where o.orderbook_address = $1
                   and o.order_id = r.order_id::numeric
                   and o.status = 'OPEN'
                   and (   (o.token_contract is null and r.tc is not null)
-                       or (o.deadline is null and r.deadline is not null))"#,
+                       or (o.deadline is null and r.deadline is not null)
+                       or (o.flags is null and not o.is_subscription and r.flags is not null))"#,
         )
         .bind(ob)
         .bind(&ids)
         .bind(&tcs)
         .bind(&deadlines)
+        .bind(&flags)
         .execute(&self.pool)
         .await
         .context("repair inference order fields")?;

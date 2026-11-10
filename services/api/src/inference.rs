@@ -12,6 +12,7 @@ use dodex_application::GetInferenceTradesUseCase;
 use dodex_application::InferenceMarketsListing;
 use dodex_application::InferenceMarketsRequest;
 use dodex_application::InferenceMarketsSort;
+use dodex_application::InferenceOrderFlag;
 use dodex_domain::DomainError;
 use dodex_domain::InferenceMarket;
 use dodex_domain::InferenceMarketStatus;
@@ -350,6 +351,8 @@ struct InferenceOrderDto {
     token_contract: Option<String>,
     note: Option<String>,
     side: &'static str,
+    /// Flags by name, in bit order. `[]` = plain limit order, `null` = unknown.
+    flags: Option<Vec<dto::InferenceOrderFlag>>,
     price: String,
     ticks: String,
     ticks_initial: String,
@@ -378,6 +381,7 @@ struct InferenceOrderDto {
         ("note" = Option<String>, Query, description = "Exact owning PrivateNote address. Mutually exclusive with `tokenContract`."),
         ("side" = Option<String>, Query, description = "BUY or SELL."),
         ("status" = Option<Vec<dto::InferenceOrderStatus>>, Query, style = Form, explode = false, description = "Comma-separated: LIVE, FILLED, CANCELLED, EXPIRED. Default: all. LIVE means the order is in the book; EXPIRED means the chain confirmed the book dropped it. Whether a LIVE row has passed its deadline is the separate includeExpired filter."),
+        ("flag" = Option<dto::InferenceOrderFlagFilter>, Query, description = "One order flag that can rest in the book: POST_ONLY, TEE, AON or SUBSCRIPTION. Returns only orders that carry it; other flags may be set too. An order whose flags are unknown (flags: null) never matches. IOC, FOK and MARKET never rest and are rejected with -1130, as is a flag combined with note or tokenContract, sent more than once, or sent as `flags`."),
         ("limit" = Option<i64>, Query, minimum = 1, maximum = 500, description = "Page size. Default 100, max 500; out-of-range values are rejected."),
         ("cursor" = Option<String>, Query, description = "Keyset cursor from a previous call's nextCursor."),
         ("includeExpired" = Option<bool>, Query, description = "Include orders that are in the book but past their deadline — present yet unmatchable. A filter of its own, composed with status. Default false. A tokenContract query returns such rows either way."),
@@ -402,6 +406,12 @@ pub(crate) async fn get_inference_orders(
 
     let address = non_blank_query(req, "inferenceOrderBookAddress")?
         .ok_or(ApiError::from(DomainError::MissingParameter))?;
+    // `flags=` would be ignored and a repeated `flag=` truncated to its first value: reject both.
+    if req.queries().contains_key("flags")
+        || req.queries().get_vec("flag").is_some_and(|values| values.len() > 1)
+    {
+        return Err(ApiError::from(DomainError::InvalidParameter));
+    }
     // One clock for both: clients compare `deadline` against `serverTime`, so
     // the rows must be cut at the instant the response reports.
     let now = now_seconds();
@@ -411,6 +421,7 @@ pub(crate) async fn get_inference_orders(
         note: non_blank_query(req, "note")?,
         side: non_blank_query(req, "side")?,
         status_csv: non_blank_query(req, "status")?,
+        flag: non_blank_query(req, "flag")?,
         // A non-numeric limit is InvalidParameter here; an out-of-range numeric one is
         // MissingParameter inside the use case, matching prediction/orders.
         limit: optional_typed_query::<i64>(req, "limit")?,
@@ -443,6 +454,7 @@ pub(crate) async fn get_inference_orders(
             .orders
             .into_iter()
             .map(|o| InferenceOrderDto {
+                flags: o.flags.and_then(|mask| render_flags(&address, &o.order_id, mask)),
                 order_id: o.order_id,
                 inference_order_book_address: address.clone(),
                 token_contract: o.token_contract,
@@ -458,6 +470,22 @@ pub(crate) async fn get_inference_orders(
             })
             .collect(),
     }))
+}
+
+/// Names for a stored mask. A bit outside `SUPPORTED_FLAGS` renders `null` and is logged.
+fn render_flags(
+    orderbook_address: &str,
+    order_id: &str,
+    mask: i16,
+) -> Option<Vec<dto::InferenceOrderFlag>> {
+    let Some(flags) = InferenceOrderFlag::from_mask(mask) else {
+        error!(
+            orderbook_address,
+            order_id, mask, "inference_orders.flags carries a bit outside SUPPORTED_FLAGS",
+        );
+        return None;
+    };
+    Some(flags.into_iter().map(dto::InferenceOrderFlag::from).collect())
 }
 
 /// One public trade in the `GET /api/v1/inference/trades` tape. The endpoint returns a

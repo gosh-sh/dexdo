@@ -111,7 +111,7 @@ async fn order_placed_seeds_market_and_rests_order() {
         serde_json::json!({
         "orderId":"5","isBuy":true,"price":"100","ticks":"10","note":"0:note5",
         // A BUY carries the zero address on chain; only a SELL names a deal contract.
-        "tokenContract":ZERO_ADDRESS,"deadline":"0" }),
+        "tokenContract":ZERO_ADDRESS,"deadline":"0", "flags": "0" }),
     );
     assert_eq!(project(&mut tx, &e, &node(ob, "co-1")).await, ProjectionOutcome::Applied);
     tx.commit().await.unwrap();
@@ -149,7 +149,7 @@ async fn order_placed_replay_does_not_reset_partial_fill() {
     let mut tx = pool.begin().await.unwrap();
     let e = ev(
         "InferenceOrderPlaced",
-        serde_json::json!({"orderId":"9","isBuy":false,"price":"7","ticks":"10","note":"0:n","tokenContract":"0:tc","deadline":"0"}),
+        serde_json::json!({"orderId":"9","isBuy":false,"price":"7","ticks":"10","note":"0:n","tokenContract":"0:tc","deadline":"0", "flags": "0"}),
     );
     project(&mut tx, &e, &node(ob, "co-1")).await;
     tx.commit().await.unwrap();
@@ -225,7 +225,7 @@ async fn order_cancelled_is_terminal_and_defers_when_absent() {
     assert_eq!(n, 0);
     // Place then cancel => CANCELLED, swept_at NULL.
     let mut tx = pool.begin().await.unwrap();
-    project(&mut tx,&ev("InferenceOrderPlaced",serde_json::json!({"orderId":"2","isBuy":true,"price":"1","ticks":"5","note":"0:n","tokenContract":ZERO_ADDRESS,"deadline":"0"})),&node(ob,"co-2")).await;
+    project(&mut tx,&ev("InferenceOrderPlaced",serde_json::json!({"orderId":"2","isBuy":true,"price":"1","ticks":"5","note":"0:n","tokenContract":ZERO_ADDRESS,"deadline":"0", "flags": "0"})),&node(ob,"co-2")).await;
     assert_eq!(project(&mut tx, &c, &node(ob, "co-3")).await, ProjectionOutcome::Applied);
     tx.commit().await.unwrap();
     let (status, swept_null): (String, bool) = sqlx::query_as(
@@ -268,7 +268,7 @@ async fn order_expired_is_terminal_and_defers_when_absent() {
     assert_eq!(n, 0);
     // A placed order stays OPEN while its deadline sits in the past ...
     let mut tx = pool.begin().await.unwrap();
-    project(&mut tx,&ev("InferenceOrderPlaced",serde_json::json!({"orderId":"3","isBuy":true,"price":"1","ticks":"5","note":"0:n","tokenContract":ZERO_ADDRESS,"deadline":"1700000000"})),&node(ob,"xo-2")).await;
+    project(&mut tx,&ev("InferenceOrderPlaced",serde_json::json!({"orderId":"3","isBuy":true,"price":"1","ticks":"5","note":"0:n","tokenContract":ZERO_ADDRESS,"deadline":"1700000000", "flags": "0"})),&node(ob,"xo-2")).await;
     tx.commit().await.unwrap();
     let status: String = sqlx::query_scalar(
         "select status from inference_orders where orderbook_address=$1 and order_id=3",
@@ -308,7 +308,7 @@ async fn expired_overrides_provisional_sweep_cancel_but_not_a_real_cancel() {
         .unwrap();
     let mut tx = pool.begin().await.unwrap();
     for id in ["40", "41"] {
-        project(&mut tx,&ev("InferenceOrderPlaced",serde_json::json!({"orderId":id,"isBuy":true,"price":"1","ticks":"5","note":"0:n","tokenContract":ZERO_ADDRESS,"deadline":"1700000000"})),&node(ob,&format!("eo-{id}"))).await;
+        project(&mut tx,&ev("InferenceOrderPlaced",serde_json::json!({"orderId":id,"isBuy":true,"price":"1","ticks":"5","note":"0:n","tokenContract":ZERO_ADDRESS,"deadline":"1700000000", "flags": "0"})),&node(ob,&format!("eo-{id}"))).await;
     }
     tx.commit().await.unwrap();
     // 40: provisional sweep-cancel (swept_at set). 41: real event-cancel (swept_at NULL).
@@ -400,7 +400,7 @@ async fn routes_by_event_type_when_event_name_is_empty() {
         contract_kind: "",
         event_name: String::new(), // <-- as the live loop builds it
         event_type: "InferenceOrderBook.InferenceOrderPlaced".to_string(),
-        value: serde_json::json!({"orderId":"7","isBuy":true,"price":"1","ticks":"3","note":"0:n","tokenContract":ZERO_ADDRESS,"deadline":"0"}),
+        value: serde_json::json!({"orderId":"7","isBuy":true,"price":"1","ticks":"3","note":"0:n","tokenContract":ZERO_ADDRESS,"deadline":"0", "flags": "0"}),
     };
     assert_eq!(project(&mut tx, &loop_shaped, &node(ob, "co-1")).await, ProjectionOutcome::Applied);
     tx.commit().await.unwrap();
@@ -657,7 +657,7 @@ async fn expired_filled_orphan_decrements_present_leg() {
         serde_json::json!({
             "orderId":"700","isBuy":true,"price":"5","ticks":"10","note":"0:n",
             "tokenContract":ZERO_ADDRESS,
-            "deadline":"0",
+            "deadline":"0", "flags": "0",
         }),
     );
     assert_eq!(
@@ -734,7 +734,7 @@ async fn place(
             "orderId": id, "isBuy": is_buy, "price": "1", "ticks": ticks, "note": "0:n",
             // A BUY carries the zero address on chain; only a SELL names a deal contract.
             "tokenContract": if is_buy { ZERO_ADDRESS } else { "0:tc" },
-            "deadline": "0",
+            "deadline": "0", "flags": "0",
         }),
     );
     project(tx, &e, &node(ob, co)).await;
@@ -949,14 +949,14 @@ async fn filled_links_deal_to_orderbook_seller_buyer() {
     let sell = ev(
         "InferenceOrderPlaced",
         serde_json::json!({
-        "orderId":"1","isBuy":false,"price":"100","ticks":"10","note":"0:seller","tokenContract":tc,"deadline":"0"}),
+        "orderId":"1","isBuy":false,"price":"100","ticks":"10","note":"0:seller","tokenContract":tc,"deadline":"0", "flags": "0"}),
     );
     project(&mut tx, &sell, &node(ob, "co-1")).await;
     // BUY leg by the buyer note; order_id 2.
     let buy = ev(
         "InferenceOrderPlaced",
         serde_json::json!({
-        "orderId":"2","isBuy":true,"price":"100","ticks":"10","note":"0:buyer","tokenContract":ZERO_ADDRESS,"deadline":"0"}),
+        "orderId":"2","isBuy":true,"price":"100","ticks":"10","note":"0:buyer","tokenContract":ZERO_ADDRESS,"deadline":"0", "flags": "0"}),
     );
     project(&mut tx, &buy, &node(ob, "co-2")).await;
     // Filled crossing them; carries sellerTC + buyerNote.
@@ -1011,7 +1011,7 @@ async fn orphan_repair_filled_links_deal() {
     let sell = ev(
         "InferenceOrderPlaced",
         serde_json::json!({
-        "orderId":"1","isBuy":false,"price":"100","ticks":"10","note":"0:seller","tokenContract":tc,"deadline":"0"}),
+        "orderId":"1","isBuy":false,"price":"100","ticks":"10","note":"0:seller","tokenContract":tc,"deadline":"0", "flags": "0"}),
     );
     project_inference_event(&mut tx, &sell, &node(ob, "co-1")).await.unwrap();
     // Expired Filled orphan: maker(1) present, taker(2) dropped.
@@ -1124,7 +1124,7 @@ async fn orphan_repair_filled_taker_only_resolves_from_taker_side() {
     let buy = ev(
         "InferenceOrderPlaced",
         serde_json::json!({
-        "orderId":"2","isBuy":true,"price":"100","ticks":"10","note":"0:buyer","tokenContract":ZERO_ADDRESS,"deadline":"0"}),
+        "orderId":"2","isBuy":true,"price":"100","ticks":"10","note":"0:buyer","tokenContract":ZERO_ADDRESS,"deadline":"0", "flags": "0"}),
     );
     project_inference_event(&mut tx, &buy, &node(ob, "co-1")).await.unwrap();
     // Expired Filled orphan: taker(2) present, maker(1) dropped.
@@ -1171,7 +1171,7 @@ async fn project_placed(
             "orderId": id.to_string(), "isBuy": is_buy, "price": price, "ticks": ticks,
             "note": "0:n",
             "tokenContract": tc.unwrap_or(ZERO_ADDRESS),
-            "deadline": deadline.to_string(),
+            "deadline": deadline.to_string(), "flags": "0",
         }),
     );
     let mut tx = pool.begin().await.unwrap();
@@ -1261,7 +1261,7 @@ async fn a_placement_missing_token_contract_fails_projection_instead_of_insertin
         10,
         serde_json::json!({
             "orderId": "10", "isBuy": false, "price": "10", "ticks": "5", "note": "0:n",
-            "deadline": "0",
+            "deadline": "0", "flags": "0",
         }),
     )
     .await
@@ -1292,7 +1292,7 @@ async fn a_placement_missing_note_fails_projection_instead_of_inserting_null() {
         11,
         serde_json::json!({
             "orderId": "11", "isBuy": false, "price": "10", "ticks": "5",
-            "tokenContract": ZERO_ADDRESS, "deadline": "0",
+            "tokenContract": ZERO_ADDRESS, "deadline": "0", "flags": "0",
         }),
     )
     .await
@@ -1515,5 +1515,102 @@ async fn deferred_filled_writes_no_tape_row() {
 
     assert!(tape_rows(&pool, ob).await.is_empty());
 
+    clean(&pool, ob).await;
+}
+
+// ---- flags (migration 0007) ----
+
+async fn stored_flags(pool: &PgPool, ob: &str, id: i64) -> (Option<i16>, bool) {
+    sqlx::query_as(
+        "select flags, is_subscription from inference_orders where orderbook_address=$1 and order_id=$2",
+    )
+    .bind(ob)
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+fn placed_with_flags(id: i64, flags: &str) -> serde_json::Value {
+    serde_json::json!({
+        "orderId": id.to_string(), "isBuy": true, "price": "10", "ticks": "5", "note": "0:n",
+        "tokenContract": ZERO_ADDRESS, "deadline": "0", "flags": flags,
+    })
+}
+
+#[tokio::test]
+async fn order_placed_stores_flags_and_derives_is_subscription_from_bit_0x40() {
+    let Some(pool) = setup().await else { return };
+    let ob = "0:flags-persist";
+    clean(&pool, ob).await;
+
+    project_placed_raw(&pool, ob, 1, placed_with_flags(1, "0")).await.unwrap();
+    project_placed_raw(&pool, ob, 2, placed_with_flags(2, "48")).await.unwrap(); // TEE + AON
+    project_placed_raw(&pool, ob, 3, placed_with_flags(3, "96")).await.unwrap(); // AON + SUBSCRIPTION
+
+    // 0 is stored as 0, not NULL: a plain limit order is a known answer.
+    assert_eq!(stored_flags(&pool, ob, 1).await, (Some(0), false));
+    assert_eq!(stored_flags(&pool, ob, 2).await, (Some(0x30), false));
+    assert_eq!(stored_flags(&pool, ob, 3).await, (Some(0x60), true));
+    clean(&pool, ob).await;
+}
+
+#[tokio::test]
+async fn a_placement_missing_or_mangling_flags_fails_projection_instead_of_inserting_null() {
+    let Some(pool) = setup().await else { return };
+    let ob = "0:flags-drift";
+    clean(&pool, ob).await;
+
+    let mut missing = placed_with_flags(13, "0");
+    missing.as_object_mut().unwrap().remove("flags");
+    let err = project_placed_raw(&pool, ob, 13, missing)
+        .await
+        .expect_err("a missing flags field must fail the projection");
+    assert!(format!("{err:#}").contains("flags"));
+
+    // Wider than uint8: decoder drift, not a mask the book could emit.
+    let err = project_placed_raw(&pool, ob, 14, placed_with_flags(14, "256"))
+        .await
+        .expect_err("a flags value wider than uint8 must fail the projection");
+    assert!(format!("{err:#}").contains("flags"));
+
+    let rows: i64 =
+        sqlx::query_scalar("select count(*) from inference_orders where orderbook_address=$1")
+            .bind(ob)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, 0, "no row may be inserted from an undecodable placement");
+}
+
+#[tokio::test]
+async fn a_retired_subscription_placement_leaves_flags_unknown_and_never_erases_them() {
+    let Some(pool) = setup().await else { return };
+    let ob = "0:flags-sub";
+    clean(&pool, ob).await;
+
+    let sub = ev(
+        "InferenceSubscriptionPlaced",
+        serde_json::json!({
+            "orderId": "4", "buyerNote": "0:bn", "maxPrice": "50", "ticks": "8",
+            "cycleBudget": "0", "autoRenew": false, "flags": "16",
+        }),
+    );
+    let mut tx = pool.begin().await.unwrap();
+    assert_eq!(project(&mut tx, &sub, &node(ob, "co-sub-4")).await, ProjectionOutcome::Applied);
+    tx.commit().await.unwrap();
+    // The event's own flags (TEE here) predate AON / SUBSCRIPTION: unknown, not "TEE only".
+    assert_eq!(stored_flags(&pool, ob, 4).await, (None, true));
+
+    // A known mask survives a replay that carries none.
+    sqlx::query("update inference_orders set flags = 96 where orderbook_address=$1 and order_id=4")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    project(&mut tx, &sub, &node(ob, "co-sub-4")).await;
+    tx.commit().await.unwrap();
+    assert_eq!(stored_flags(&pool, ob, 4).await, (Some(0x60), true));
     clean(&pool, ob).await;
 }
