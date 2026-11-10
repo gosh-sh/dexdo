@@ -793,7 +793,7 @@ impl InferenceReconciler {
         let deadlines: Vec<Option<String>> = repairs.iter().map(|r| r.deadline.clone()).collect();
         let flags: Vec<Option<i16>> = repairs.iter().map(|r| r.flags).collect();
 
-        // Every array binds as `text[]` — that is what sqlx sends for `Vec<String>` and
+        // The string arrays bind as `text[]` — that is what sqlx sends for `Vec<String>` and
         // `Vec<Option<String>>` — and the two numeric columns are cast per element at the
         // point of use. Declaring the parameter `$2::numeric[]` instead would lean on
         // Postgres's array-level `text[] -> numeric[]` coercion, which is a different code

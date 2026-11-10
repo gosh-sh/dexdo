@@ -1581,6 +1581,7 @@ async fn sweep_repairs_token_contract_and_deadline_independently() {
     let g = std::sync::Arc::new(FnGetter(|name: &str, a: &Value| match name {
         "getQueueSize" => Ok(json!({ "value0": "0" })),
         "getStats" => Ok(json!({ "nextOrderId": "9" })),
+        // No `flags` on purpose: the only test of a getOrder whose flags fail to decode.
         "getOrder" => Ok(match a.get("id").and_then(|v| v.as_str()) {
             Some("1") => json!({ "amount": "5", "tokenContract": "0:deal", "deadline": "0" }),
             _ => json!({ "amount": "5", "tokenContract": ZERO_ADDRESS, "deadline": "1760003600" }),
@@ -1605,6 +1606,10 @@ async fn sweep_repairs_token_contract_and_deadline_independently() {
         Some("1760003600"),
         "deadline repair must not depend on a TC being present"
     );
+    // Undecodable flags stay unknown, never a plain `0`, and do not block the repairs above.
+    for id in [1, 2] {
+        assert_eq!(flags_row(&pool, ob, id).await, (None, false), "order {id}");
+    }
 
     // A second sweep must not rewrite a row whose remaining NULL is intentional.
     let before: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
