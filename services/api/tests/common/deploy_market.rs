@@ -25,8 +25,11 @@ use std::time::UNIX_EPOCH;
 
 use ackinacki_kit::contracts::account::AccountStatus;
 use ackinacki_kit::contracts::account::ParamsOfWaitAccount;
+use ackinacki_kit::contracts::error::KitError;
+use ackinacki_kit::contracts::error::KitErrorCode;
 use ackinacki_kit::contracts::traits::AccountAccessor;
 use ackinacki_kit::tvm_client::abi::Signer;
+use ackinacki_kit::tvm_client::client::ErrorCode as ClientErrorCode;
 use ackinacki_kit::tvm_client::crypto::generate_random_sign_keys;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
 use ackinacki_kit::tvm_client::net::NetworkConfig;
@@ -501,21 +504,47 @@ async fn diagnose_missing_pmp(
     out
 }
 
+/// Polls until the account is Active, one `wait_account` attempt at a time. The kit's own
+/// loop aborts on the first transport error (shellnet resets connections now and then), so
+/// a dropped request here costs one attempt instead of failing the test.
 async fn wait_active<A: AccountAccessor>(
     handle: A,
     attempts: u8,
     interval_ms: u64,
     label: &str,
 ) -> anyhow::Result<()> {
-    handle
-        .wait_account(ParamsOfWaitAccount {
-            status: AccountStatus::Active,
-            attempts: Some(attempts),
-            attempts_timeout: Some(interval_ms),
-        })
-        .await
-        .map_err(|e| anyhow!("wait {label} active: {e:?}"))?;
-    Ok(())
+    let one_attempt = || ParamsOfWaitAccount {
+        status: AccountStatus::Active,
+        attempts: Some(1),
+        attempts_timeout: Some(interval_ms),
+    };
+    let mut last_transport_error = None;
+    for _ in 0..attempts {
+        match handle.wait_account(one_attempt()).await {
+            Ok(()) => return Ok(()),
+            // Not Active yet; the kit already slept `interval_ms`.
+            Err(e) if e.code == KitErrorCode::WaitAccount => {}
+            Err(e) if is_transport_error(&e) => {
+                last_transport_error = Some(e);
+                tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+            }
+            Err(e) => return Err(anyhow!("wait {label} active: {e:?}")),
+        }
+    }
+    Err(anyhow!(
+        "wait {label} active: not Active after {attempts} attempts; last transport error: \
+         {last_transport_error:?}"
+    ))
+}
+
+fn is_transport_error(e: &KitError) -> bool {
+    const TRANSPORT: [u32; 4] = [
+        ClientErrorCode::WebsocketConnectError as u32,
+        ClientErrorCode::WebsocketReceiveError as u32,
+        ClientErrorCode::WebsocketSendError as u32,
+        ClientErrorCode::HttpRequestSendError as u32,
+    ];
+    e.tvm_error.as_ref().is_some_and(|t| TRANSPORT.contains(&t.code()))
 }
 
 fn build_context(endpoints: Vec<String>) -> anyhow::Result<Arc<ClientContext>> {
