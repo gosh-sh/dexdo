@@ -10,7 +10,8 @@
 // on it is dropped, and every request attached to it receives its outcome,
 // success or failure. Nothing is stored on failure. A calculation is cut at
 // `FLIGHT_TIMEOUT`: detached from its requests, it no longer falls under the
-// request-timeout hoop, and the pool sets no statement timeout.
+// request-timeout hoop. The repository bounds each statement in the database
+// first (25 s); this cut is the backstop.
 //
 // The one invariant that keeps a slot from wedging: a flight is registered
 // together with the `Flight` guard that owns it, and only that guard's `Drop`
@@ -23,6 +24,7 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::PoisonError;
 use std::time::Duration;
+use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -32,6 +34,7 @@ use dodex_domain::InferenceStatsPeriod;
 use dodex_domain::InferenceStatsVolume24h;
 use tokio::sync::watch;
 use tracing::error;
+use tracing::info;
 
 use crate::SharedInferenceRepo;
 
@@ -57,6 +60,8 @@ pub(crate) const HISTORY_ALL_TTL_MS: i64 = 14_400_000;
 /// returns would hold its slot for the life of the process, every later request
 /// joining it and timing out. A cut calculation fails like any other:
 /// `DomainError::RequestTimeout`, nothing stored, the next request starts afresh.
+/// A backstop: the repository's 25 s `statement_timeout` cancels a stalled statement in
+/// the database first; dropping the future here sends no cancel.
 pub(crate) const FLIGHT_TIMEOUT: Duration = Duration::from_secs(30);
 
 const DAY_MS: i64 = 86_400_000;
@@ -231,8 +236,19 @@ where
     Fut: Future<Output = Result<T, anyhow::Error>>,
 {
     let as_of_ms = clock();
+    let started = Instant::now();
     flight.landed = Some(match tokio::time::timeout(bound, calculate(as_of_ms)).await {
-        Ok(Ok(value)) => Ok(Stored { value: Arc::new(value), stored_at_ms: clock() }),
+        Ok(Ok(value)) => {
+            // The production signal that a cold calculation drifts toward the frontend's
+            // 4.5 s budget: the flight lands even when its requests have timed out.
+            info!(
+                slot = flight.slot.name,
+                as_of_ms,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "inference stats block recalculated"
+            );
+            Ok(Stored { value: Arc::new(value), stored_at_ms: clock() })
+        }
         Ok(Err(err)) => {
             error!(?err, slot = flight.slot.name, as_of_ms, "inference stats calculation failed");
             Err(err.downcast_ref::<DomainError>().copied().unwrap_or(DomainError::Unexpected))
@@ -630,6 +646,19 @@ mod tests {
         f.set_clock(T0 + 30_000 + 600_000);
         f.cache.volume_24h().await.unwrap();
         assert_eq!(f.volume_calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn each_history_period_has_its_own_slot() {
+        let f = Fixture::new(StubRepo::default(), T0);
+        f.cache.history(InferenceStatsPeriod::Days14).await.unwrap();
+        f.cache.history(InferenceStatsPeriod::Days30).await.unwrap();
+        assert_eq!(f.history_calls(), 2);
+        f.cache.history(InferenceStatsPeriod::Days30).await.unwrap();
+        assert_eq!(f.history_calls(), 2);
+        // Nor does `30d` share the `all` slot.
+        f.cache.history(InferenceStatsPeriod::All).await.unwrap();
+        assert_eq!(f.history_calls(), 3);
     }
 
     #[tokio::test]

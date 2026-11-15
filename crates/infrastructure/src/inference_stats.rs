@@ -5,6 +5,7 @@
 // integers and returns them as text; Rust adds them as `BigUint`. No floats.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use anyhow::anyhow;
 use anyhow::Context;
@@ -21,6 +22,10 @@ use dodex_domain::InferenceStatsPreviousPeriod;
 use dodex_domain::InferenceStatsTotals;
 use dodex_domain::InferenceStatsVolume24h;
 use num_bigint::BigUint;
+use sqlx::postgres::PgArguments;
+use sqlx::postgres::PgRow;
+use sqlx::query::Query;
+use sqlx::Postgres;
 use sqlx::Row;
 use tracing::warn;
 
@@ -29,6 +34,16 @@ use crate::inference_reconciler::QUOTE_TOKEN_TYPE_SHELL;
 use crate::postgres_repo::validate_decimal_scale;
 use crate::postgres_repo::PostgresReadModelRepository;
 use crate::postgres_repo::MAX_DECIMAL_PRECISION;
+
+/// Database-side bound on each statistics statement: a LOCAL `statement_timeout`, so
+/// Postgres cancels a stalled statement (a lock wait included) and its connection goes
+/// back to the pool. Deliberately below the API cache's 30 s `FLIGHT_TIMEOUT`, which
+/// stays as the backstop; cutting only there would drop the future but leave the
+/// statement running and its connection held.
+pub(crate) const STATS_STATEMENT_TIMEOUT: Duration = Duration::from_secs(25);
+
+/// SQLSTATE `query_canceled`: what a statement cut by `statement_timeout` fails with.
+const QUERY_CANCELED: &str = "57014";
 
 /// One SQL group: raw sums for one day at one pair of scales.
 pub(crate) struct StatsGroup {
@@ -330,7 +345,20 @@ impl PostgresReadModelRepository {
         as_of_ms: i64,
         scope: &[String],
     ) -> anyhow::Result<InferenceStatsHistory> {
-        self.stats_history(period, as_of_ms, Some(scope)).await
+        self.stats_history(period, as_of_ms, Some(scope), STATS_STATEMENT_TIMEOUT).await
+    }
+
+    /// `inference_stats_history` with its database-side bound set to `statement_timeout`
+    /// instead of `STATS_STATEMENT_TIMEOUT`, so a test can reach the bound in milliseconds.
+    /// Unscoped: the real statement, for a private schema.
+    #[doc(hidden)]
+    pub async fn inference_stats_history_with_statement_timeout(
+        &self,
+        period: InferenceStatsPeriod,
+        as_of_ms: i64,
+        statement_timeout: Duration,
+    ) -> anyhow::Result<InferenceStatsHistory> {
+        self.stats_history(period, as_of_ms, None, statement_timeout).await
     }
 
     /// `inference_stats_volume_24h` restricted to the given book addresses.
@@ -342,11 +370,44 @@ impl PostgresReadModelRepository {
         self.stats_volume_24h(as_of_ms, Some(scope)).await
     }
 
+    /// Runs one statistics statement in a transaction that first sets the LOCAL
+    /// `statement_timeout`. A statement Postgres cancelled at that bound is
+    /// `RequestTimeout`; any other error carries `context`.
+    async fn fetch_stats_rows(
+        &self,
+        query: Query<'_, Postgres, PgArguments>,
+        statement_timeout: Duration,
+        block: &'static str,
+        context: &'static str,
+    ) -> anyhow::Result<Vec<PgRow>> {
+        let mut tx = self.pool().begin().await.context(context)?;
+        sqlx::query("select set_config('statement_timeout', $1, true)")
+            .bind(statement_timeout.as_millis().to_string())
+            .execute(&mut *tx)
+            .await
+            .context(context)?;
+        let rows = match query.fetch_all(&mut *tx).await {
+            Ok(rows) => rows,
+            Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some(QUERY_CANCELED) => {
+                warn!(
+                    block,
+                    bound_ms = statement_timeout.as_millis() as u64,
+                    "inference stats statement ran past its database-side bound and was cancelled"
+                );
+                return Err(anyhow!(DomainError::RequestTimeout));
+            }
+            Err(err) => return Err(anyhow::Error::new(err).context(context)),
+        };
+        tx.commit().await.context(context)?;
+        Ok(rows)
+    }
+
     pub(crate) async fn stats_history(
         &self,
         period: InferenceStatsPeriod,
         as_of_ms: i64,
         scope: Option<&[String]>,
+        statement_timeout: Duration,
     ) -> anyhow::Result<InferenceStatsHistory> {
         let window = history_window(period, as_of_ms)?;
         let bounded = window.selected_from.zip(window.previous_from);
@@ -360,7 +421,9 @@ impl PostgresReadModelRepository {
         if let Some(scope) = scope {
             query = query.bind(scope);
         }
-        let rows = query.fetch_all(self.pool()).await.context("inference stats history")?;
+        let rows = self
+            .fetch_stats_rows(query, statement_timeout, period.as_str(), "inference stats history")
+            .await?;
 
         // No rows means no executions in range: the evidence is irrelevant then, because
         // `previous_period` is withheld while the selected period has no fills.
@@ -403,7 +466,14 @@ impl PostgresReadModelRepository {
         if let Some(scope) = scope {
             query = query.bind(scope);
         }
-        let rows = query.fetch_all(self.pool()).await.context("inference stats volume 24h")?;
+        let rows = self
+            .fetch_stats_rows(
+                query,
+                STATS_STATEMENT_TIMEOUT,
+                "volume24h",
+                "inference stats volume 24h",
+            )
+            .await?;
         // The day only labels a group in diagnostics; the 24 h block has no day axis.
         let day = as_of.date_naive();
         let groups = rows

@@ -876,7 +876,7 @@ The service cannot prove that capture was gap-free over a past interval; nothing
 
 Condition 3 exists because the projection loop does not stop at an event it cannot apply: a `Deferred` or failing event stays pending and is retried while later events are projected past it, so a fill inside the previous interval can be missing from the tape while both brackets are present. The probe is limited to the previous interval on purpose: pending events inside the selected period are the normal projection lag of the last seconds, and treating them as doubt would blank the comparison for an hour at a time. The probe's cost follows the size of the unprojected backlog, not of the tape. `indexer_cursors.at_head` is not used: it turns false whenever a poll sees a next page, which would blank the comparison at random.
 
-What stays unproven: an event the gateway never delivered leaves nothing to probe, and a fill the projector leaves off the tape by design (direction unresolvable) is absent from the totals as it is from `/trades`. The API reference words the rule accordingly. Costs: a selected period without executions yields `null` though history may be complete; a first execution inside the previous interval yields `null`; a stuck or time-less event under a book keeps it `null` until repaired.
+What stays unproven: an event the gateway never delivered leaves nothing to probe, and a fill the projector leaves off the tape by design (direction unresolvable) is absent from the totals as it is from `/trades`. The API reference words the rule accordingly. Costs: a selected period without executions yields `null` though history may be complete; a first execution inside the previous interval yields `null`; a stuck or time-less event under a book keeps it `null` until repaired. Those are the same permanently undecoded or unprojected `raw_events` rows that make `/inference/orders` refuse to answer; diagnosis and repair are in the runbook [When `/api/v1/inference/orders` refuses to answer](../../deploy/ansible/README.md#when-apiv1inferenceorders-refuses-to-answer) (its first case, an unprojected message under the book's address).
 
 ### Cache
 
@@ -887,7 +887,8 @@ What stays unproven: an event the gateway never delivered leaves nothing to prob
 - **UTC date rollover.** A history block also records the UTC date it was computed for and is stale as soon as the current date differs, whatever its age. The check applies equally to a block received from a calculation in flight: a request that joined, after UTC midnight, a calculation started before it does not return yesterday's days. It waits for a calculation made for the current day. That wait is bounded to one further calculation; if that one is dated on another day too (the repository did not honour the cutoff it was given), the request fails with the API's internal error (`-1000`) rather than return a block for the wrong day.
 - **Shared flights.** A request that finds its slot missing or stale starts one calculation; requests arriving while it is in flight join it and receive its outcome, success or failure, so a failing database is hit once per burst, not once per waiter. Different slots never block each other.
 - **Detached calculation.** A flight is a spawned task: once started it runs to completion and fills the slot even if every request that joined it is dropped (client disconnect, request-timeout hoop). Otherwise a calculation slower than the client's patience would never populate the cache.
-- **A calculation is bounded in time**: 30 s (`FLIGHT_TIMEOUT`). Detaching removes the bound the request-timeout hoop gave a hung query, and the pool sets no statement timeout; without its own bound, a calculation that never returned would hold its slot for the life of the process with every later request joining it. A calculation cut at the bound fails like any other: nothing is stored, its participants get `RequestTimeout` (`-1007` / 504), and the next request starts a new one.
+- **A calculation is bounded in time**, in the database first. Each of the two statements runs in its own transaction that sets a LOCAL `statement_timeout` of 25 s (`STATS_STATEMENT_TIMEOUT` in `inference_stats.rs`), so after 25 s Postgres cancels the statement itself — a lock wait included — and the pool connection is released. A statement cancelled that way (SQLSTATE `57014`) is `RequestTimeout`, with one warning naming the block and the bound. The whole calculation is also cut at 30 s (`FLIGHT_TIMEOUT`), the backstop for anything the database does not cancel: detaching removes the bound the request-timeout hoop gave a hung query, and without a bound of its own a calculation that never returned would hold its slot for the life of the process with every later request joining it. The backstop alone is not enough: dropping the future sends no cancel, so the statement would keep running and its connection stay held, and with failures not remembered a stalled database would drain the API's small pool — shared with the trading endpoints — through this one public route. Either way the calculation fails like any other: nothing is stored, its participants get `RequestTimeout` (`-1007` / 504), and the next request starts a new one.
+- **Logging.** Each successful calculation logs one `info` line with its slot and `elapsed_ms`, the production signal that a cold calculation is drifting toward the frontend's 4.5 s budget (the flight lands even when its requests have given up). A cache hit logs nothing.
 - **Failures are not stored.** A request arriving after a flight has ended starts a new calculation. Valid empty and all-zero results are cached like any other. A failure in one slot leaves the other slots' values in place.
 - **Clock.** Time is injected (`ClockMs`), so tests drive TTL expiry and the date rollover without sleeping; production uses the system clock.
 
@@ -900,15 +901,23 @@ A cold request therefore pays one calculation per slot it needs.
 | `period` blank | `MissingParameter` | `-1102` | 400 |
 | `period` unknown, wrong case, or sent more than once | `InvalidParameter` | `-1130` | 400 |
 | Scale outside the accepted range, missing `ref_tokens` row, or an undecodable aggregate | `MarketInconsistent` | `-1500` | 503 |
-| A calculation exceeded its 30 s bound | `RequestTimeout` | `-1007` | 504 |
+| A statement ran past 25 s and Postgres cancelled it (its connection is released), or the calculation was cut at the 30 s backstop | `RequestTimeout` | `-1007` | 504 |
 | Unexpected (DB / decode / etc.), or the cache not wired | `Unexpected` | `-1000` | 500 |
 
 An absent `period` is `14d`.
 
+The endpoint fails closed on one bad book: a single stored precision out of range turns every calculation that reaches its executions into `-1500`. The warning (`inference stats qty scale out of range`) carries only the day and the scale, because the statement groups by scale, not by book. To find the book behind it:
+
+```sql
+select orderbook_address, quantity_precision, quote_token_type from inference_markets where quantity_precision not between 0 and 38;
+```
+
+The range is what `validate_decimal_scale` accepts (`0` to `MAX_DECIMAL_PRECISION`). A `quote scale out of range` warning points at `ref_tokens.decimals` of the book's quote token instead.
+
 ### Test coverage
 
-- `crates/infrastructure/tests/inference_stats_repo.rs` — day boundaries and the exclusive cutoff, zero days, units and the fallback for unreconciled books, NULL `chain_time`, idempotent replay, previous-period boundaries, the coverage rule including pending events, and totals checked against a plain reference query for every interval. Scoped to the test's own books (the shared database is written to concurrently); the unscoped statements run in a private schema.
-- `services/api/src/inference_stats_cache.rs` unit tests — TTLs, date rollover, shared and failed flights, the 30 s bound, slot independence, driven by an injected clock.
+- `crates/infrastructure/tests/inference_stats_repo.rs` — day boundaries and the exclusive cutoff, zero days, units and the fallback for unreconciled books, NULL `chain_time`, idempotent replay, previous-period boundaries, the coverage rule including pending events, and totals checked against a plain reference query for every interval. Scoped to the test's own books (the shared database is written to concurrently); the unscoped statements run in a private schema, and so does the database-side bound: a statement stalled behind an `ACCESS EXCLUSIVE` lock is cancelled at a short `statement_timeout` and reported as `RequestTimeout`, and the call succeeds once the lock is released.
+- `services/api/src/inference_stats_cache.rs` unit tests — TTLs, date rollover, shared and failed flights, the 30 s bound, slot independence (each period in its own slot), driven by an injected clock.
 - `services/api/tests/inference_stats_http.rs` — the HTTP contract against a stub repository with a pinned clock: default `14d`, `30d` / `all`, `previousPeriod` present and `null`, the `-1130` / `-1102` errors, a failure is a 503 and not cached, a second request is served from the cache.
 
 ## `/api/v1/prediction/orders`

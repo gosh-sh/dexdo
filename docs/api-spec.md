@@ -1283,7 +1283,7 @@ Errors:
 | `period` blank | `-1102` | 400 |
 | `period` not `14d`, `30d` or `all`, or sent more than once | `-1130` | 400 |
 | Stored data is temporarily inconsistent | `-1500` | 503 |
-| The calculation exceeded its 30-second bound | `-1007` | 504 |
+| The calculation exceeded its time bound: the database cancels a statement after 25 seconds (releasing its connection), and the whole calculation is cut after 30 seconds as a backstop | `-1007` | 504 |
 | Unexpected (database failure, etc.) | `-1000` | 500 |
 
 A failed calculation is never answered with partial data, and a failure is not remembered: the next request calculates again.

@@ -13,6 +13,7 @@ use std::env;
 use std::time::Duration;
 
 use dodex_application::InferenceReadRepository;
+use dodex_domain::DomainError;
 use dodex_domain::InferenceStatsPeriod;
 use dodex_domain::InferenceStatsTotals;
 use dodex_infrastructure::database;
@@ -635,6 +636,57 @@ async fn unscoped_statements_in_an_isolated_schema() {
     .await
     .unwrap();
     assert!(h.previous_period.is_none());
+
+    pool.close().await;
+    drop_isolated_schema(SCHEMA).await;
+}
+
+/// A statement stalled behind a lock is cancelled by Postgres at its `statement_timeout`
+/// and reported as `RequestTimeout`, and the next call goes through. Own private schema,
+/// so the ACCESS EXCLUSIVE lock blocks nobody else. Nothing between taking the lock and
+/// rolling it back can panic: every assertion runs after the lock is released.
+#[tokio::test]
+async fn a_statement_stalled_behind_a_lock_is_cancelled_by_its_statement_timeout() {
+    const SCHEMA: &str = "inference_stats_iso_lock";
+    const OB: &str = "0:inf_stats_iso_lock";
+    const BOUND: Duration = Duration::from_millis(200);
+    let Some(pool) = isolated_pool(SCHEMA).await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    seed_market(&pool, OB).await;
+    seed_w14(&pool, OB, "lock").await;
+
+    let mut lock = pool.begin().await.unwrap();
+    sqlx::query("lock table inference_trades in access exclusive mode")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    // The outer timeout only turns a missing database-side bound into a failure instead
+    // of a hang; it is far above `BOUND`.
+    let blocked = tokio::time::timeout(
+        Duration::from_secs(10),
+        repo.inference_stats_history_with_statement_timeout(
+            InferenceStatsPeriod::Days14,
+            as_of_ms(),
+            BOUND,
+        ),
+    )
+    .await;
+    lock.rollback().await.unwrap();
+
+    let err = blocked
+        .expect("the database cancels the statement long before the outer timeout")
+        .expect_err("the locked table stalls the statement past its bound");
+    assert_eq!(err.downcast_ref::<DomainError>(), Some(&DomainError::RequestTimeout));
+
+    let h = repo
+        .inference_stats_history_with_statement_timeout(
+            InferenceStatsPeriod::Days14,
+            as_of_ms(),
+            BOUND,
+        )
+        .await
+        .unwrap();
+    assert_eq!(h.totals, t("18", "118.500000003", 4));
 
     pool.close().await;
     drop_isolated_schema(SCHEMA).await;
