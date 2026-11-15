@@ -841,6 +841,76 @@ Three suites, the DB-backed ones gated on `TEST_DATABASE_URL`:
 - `crates/infrastructure/tests/inference_projectors.rs` — the `InferenceFilled` projector writes exactly one `inference_trades` row per event; `trade_id` equals the event's chain order; replay is idempotent (`ON CONFLICT`).
 - `services/api/tests/inference_trades_http.rs` — happy path returns a bare JSON array newest-first through the production router; the error shapes (`-1102` missing/blank address, `-1130` non-numeric limit, `-1121` unknown book); out-of-range `limit` clamps rather than erroring (`0` clamps up to `1`, an oversized value clamps down to the max); a present-but-blank `limit=` falls back to the default.
 
+## `/api/v1/inference/stats`
+
+Network-wide trading statistics over every inference book: executed ticks and quote notional per UTC day, over the last 24 hours, and for the interval before the selected period. Public (`NONE`). The figures are aggregates of the append-only [`inference_trades`](data-schema.md#inference_trades) tape — the same rows [`/api/v1/inference/trades`](#apiv1inferencetrades) serves per book — computed in Postgres and held in an in-process cache. The endpoint never queries the contract. Public shapes and semantics are in [api-spec §Inference Stats](../api-spec.md#inference-stats).
+
+### Eligibility
+
+A row counts when its `chain_time` is not NULL and falls inside the interval, whatever its book. The `last_reconciled_at IS NOT NULL` visibility gate that the per-book endpoints apply is deliberately **not** used: it would drop the history of every superseded book, and current status must not exclude an execution that happened. Books with no liquidity, superseded books and books never reconciled all count.
+
+### Units
+
+Each execution is scaled by its book's stored values, as `/inference/trades` does: `ticks` from `qty` at `inference_markets.quantity_precision`, `quote` from `price × qty` at `ref_tokens.decimals` of the book's `quote_token_type`. A book that was never reconciled has NULL in both columns (a duplicate retired at its first reconcile keeps them NULL for good), so the statement falls back to the constants the reconciler writes to every book: `QUANTITY_PRECISION` and `QUOTE_TOKEN_TYPE_SHELL` from `inference_reconciler.rs`, shared, not copied. Without the fallback, which executions count would depend on the order the books were indexed. A scale outside what `validate_decimal_scale` accepts, or a missing `ref_tokens` row, fails the whole calculation with `MarketInconsistent`.
+
+### Statements
+
+Two aggregates, in `crates/infrastructure/src/inference_stats.rs`, each taking the cutoff `asOf` as a parameter (the statement has no clock of its own):
+
+- **History.** One statement covers the selected period and the interval before it, so `perDay`, `totals` and `previousPeriod` describe one snapshot. It selects `chain_time >= <start of the previous interval> AND chain_time < asOf` (for `all`, no lower bound and no previous interval), groups by UTC day and by the two scales, and returns raw sums as text: `sum(qty)`, `sum(price * qty)`, `count(*)`. Groups before the selected period's first day sum into `previousPeriod`; the rest become `perDay`.
+- **Rolling 24 h.** `chain_time >= asOf - 24 h AND chain_time < asOf`, grouped by the two scales only. It is never derived from daily entries.
+
+Both read a `chain_time` range across all books, which `inference_trades_tape_idx` (book-first) cannot serve; the partial index `inference_trades_chain_time_idx` (migration `0009`) bounds the 24 h and 28 / 60-day scans. `all` is a full scan by nature. The index is an optimization only: the API answers without it, only slower, so there is no ordering requirement between indexer and api on this migration.
+
+### Assembly
+
+Rust applies the scales with big-integer arithmetic and adds the groups: no division, no floating point. Days are zero-filled from the first selected day through the day of `asOf`, so a day with no executions is present with `"0"` values. `totals` is the sum of the `perDay` entries actually returned, not a second query, so the two agree by construction. Decimal strings are rendered canonically (trailing fractional zeros trimmed).
+
+### Coverage of `previousPeriod`
+
+The service cannot prove that capture was gap-free over a past interval; nothing in the read model certifies it. The rule is an availability heuristic that withholds the comparison when there is a concrete reason to doubt it. For `14d` / `30d` the block carries `previousPeriod` only when all three hold, and `null` otherwise (always `null` for `all`):
+
+1. The tape holds an execution before the previous interval's start (an `EXISTS` on `chain_time` in the same statement).
+2. The selected period holds an execution (`fills > 0`). Capture is a forward scan in chain order, so an execution before the interval and one after its end mean the scan started earlier and has passed it.
+3. No captured event that could be an execution in the previous interval is still unprojected. This is a probe of `raw_events` in the same statement, for a row with `processed_at IS NULL` that is dated inside the previous interval by `created_at_chain` **or has no `created_at_chain`** (it cannot be placed, so it cannot be ruled out), and that is either an `InferenceOrderBook.InferenceFilled` or was emitted by a known inference book (`src_address` in `inference_markets`), whatever its type — an undecodable row under a book's address may be a fill, the same reasoning the [`/inference/orders` gate](#fail-closed-gate) applies per book.
+
+Condition 3 exists because the projection loop does not stop at an event it cannot apply: a `Deferred` or failing event stays pending and is retried while later events are projected past it, so a fill inside the previous interval can be missing from the tape while both brackets are present. The probe is limited to the previous interval on purpose: pending events inside the selected period are the normal projection lag of the last seconds, and treating them as doubt would blank the comparison for an hour at a time. The probe's cost follows the size of the unprojected backlog, not of the tape. `indexer_cursors.at_head` is not used: it turns false whenever a poll sees a next page, which would blank the comparison at random.
+
+What stays unproven: an event the gateway never delivered leaves nothing to probe, and a fill the projector leaves off the tape by design (direction unresolvable) is absent from the totals as it is from `/trades`. The API reference words the rule accordingly. Costs: a selected period without executions yields `null` though history may be complete; a first execution inside the previous interval yields `null`; a stuck or time-less event under a book keeps it `null` until repaired.
+
+### Cache
+
+`AppState.inference_stats` holds an `InferenceStatsCache` (`services/api/src/inference_stats_cache.rs`) over the inference repository: in-process, one instance per API process, so several API instances each keep their own. The network is implicit, one process serving one network.
+
+- **Four slots**, independent: `volume24h`, and the `14d`, `30d` and `all` history blocks. A history slot holds the whole block (`asOf`, `perDay`, `totals`, `previousPeriod`). A response is composed from the requested period's history slot plus the `volume24h` slot, each with its own `asOf`.
+- **TTLs** are constants, counted from the moment a calculation succeeds, and a read never extends them: 600 s for `volume24h`, 3,600 s for `14d` and `30d`, 14,400 s for `all`. An expired value is never served, not even as a fallback after a failure.
+- **UTC date rollover.** A history block also records the UTC date it was computed for and is stale as soon as the current date differs, whatever its age. The check applies equally to a block received from a calculation in flight: a request that joined, after UTC midnight, a calculation started before it does not return yesterday's days. It waits for a calculation made for the current day. That wait is bounded to one further calculation; if that one is dated on another day too (the repository did not honour the cutoff it was given), the request fails with the API's internal error (`-1000`) rather than return a block for the wrong day.
+- **Shared flights.** A request that finds its slot missing or stale starts one calculation; requests arriving while it is in flight join it and receive its outcome, success or failure, so a failing database is hit once per burst, not once per waiter. Different slots never block each other.
+- **Detached calculation.** A flight is a spawned task: once started it runs to completion and fills the slot even if every request that joined it is dropped (client disconnect, request-timeout hoop). Otherwise a calculation slower than the client's patience would never populate the cache.
+- **A calculation is bounded in time**: 30 s (`FLIGHT_TIMEOUT`). Detaching removes the bound the request-timeout hoop gave a hung query, and the pool sets no statement timeout; without its own bound, a calculation that never returned would hold its slot for the life of the process with every later request joining it. A calculation cut at the bound fails like any other: nothing is stored, its participants get `RequestTimeout` (`-1007` / 504), and the next request starts a new one.
+- **Failures are not stored.** A request arriving after a flight has ended starts a new calculation. Valid empty and all-zero results are cached like any other. A failure in one slot leaves the other slots' values in place.
+- **Clock.** Time is injected (`ClockMs`), so tests drive TTL expiry and the date rollover without sleeping; production uses the system clock.
+
+A cold request therefore pays one calculation per slot it needs.
+
+### Error mapping
+
+| Condition | `DomainError` | API code | HTTP |
+| --- | --- | --- | --- |
+| `period` blank | `MissingParameter` | `-1102` | 400 |
+| `period` unknown, wrong case, or sent more than once | `InvalidParameter` | `-1130` | 400 |
+| Scale outside the accepted range, missing `ref_tokens` row, or an undecodable aggregate | `MarketInconsistent` | `-1500` | 503 |
+| A calculation exceeded its 30 s bound | `RequestTimeout` | `-1007` | 504 |
+| Unexpected (DB / decode / etc.), or the cache not wired | `Unexpected` | `-1000` | 500 |
+
+An absent `period` is `14d`.
+
+### Test coverage
+
+- `crates/infrastructure/tests/inference_stats_repo.rs` — day boundaries and the exclusive cutoff, zero days, units and the fallback for unreconciled books, NULL `chain_time`, idempotent replay, previous-period boundaries, the coverage rule including pending events, and totals checked against a plain reference query for every interval. Scoped to the test's own books (the shared database is written to concurrently); the unscoped statements run in a private schema.
+- `services/api/src/inference_stats_cache.rs` unit tests — TTLs, date rollover, shared and failed flights, the 30 s bound, slot independence, driven by an injected clock.
+- `services/api/tests/inference_stats_http.rs` — the HTTP contract against a stub repository with a pinned clock: default `14d`, `30d` / `all`, `previousPeriod` present and `null`, the `-1130` / `-1102` errors, a failure is a 503 and not cached, a second request is served from the cache.
+
 ## `/api/v1/prediction/orders`
 
 `DELETE /api/v1/prediction/openOrders` (cancel-all-open) is a separate TRADE operation and is out of scope here — its tech spec lives in [write-api.md](write-api.md).

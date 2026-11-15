@@ -8,6 +8,8 @@
 #[doc(hidden)]
 pub use crate::build_router;
 #[doc(hidden)]
+pub use crate::inference_stats_cache::ClockMs;
+#[doc(hidden)]
 pub use crate::AppState;
 #[doc(hidden)]
 pub use crate::SharedAuth;
