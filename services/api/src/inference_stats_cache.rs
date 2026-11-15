@@ -8,7 +8,9 @@
 // calculation already in flight for that slot or starts one. A flight is a
 // detached task, so it lands and fills the slot even if every request waiting
 // on it is dropped, and every request attached to it receives its outcome,
-// success or failure. Nothing is stored on failure.
+// success or failure. Nothing is stored on failure. A calculation is cut at
+// `FLIGHT_TIMEOUT`: detached from its requests, it no longer falls under the
+// request-timeout hoop, and the pool sets no statement timeout.
 //
 // The one invariant that keeps a slot from wedging: a flight is registered
 // together with the `Flight` guard that owns it, and only that guard's `Drop`
@@ -20,6 +22,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::PoisonError;
+use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -49,6 +52,12 @@ pub(crate) const VOLUME_24H_TTL_MS: i64 = 600_000;
 /// `14d` and `30d`.
 pub(crate) const HISTORY_TTL_MS: i64 = 3_600_000;
 pub(crate) const HISTORY_ALL_TTL_MS: i64 = 14_400_000;
+
+/// Upper bound on one flight's repository call. Without it a calculation that never
+/// returns would hold its slot for the life of the process, every later request
+/// joining it and timing out. A cut calculation fails like any other:
+/// `DomainError::RequestTimeout`, nothing stored, the next request starts afresh.
+pub(crate) const FLIGHT_TIMEOUT: Duration = Duration::from_secs(30);
 
 const DAY_MS: i64 = 86_400_000;
 
@@ -126,13 +135,18 @@ impl<T: Block> Slot<T> {
 
     /// The slot's value when fresh; otherwise the outcome of the flight this request
     /// joins or starts. `calculate` runs only when a flight is started, with the
-    /// flight's `as_of_ms`.
-    async fn get<F, Fut>(self: &Arc<Self>, clock: &ClockMs, calculate: F) -> Outcome<T>
+    /// flight's `as_of_ms`, and is cut after `bound`.
+    async fn get<F, Fut>(
+        self: &Arc<Self>,
+        clock: &ClockMs,
+        bound: Duration,
+        calculate: F,
+    ) -> Outcome<T>
     where
         F: FnOnce(i64) -> Fut + Send + 'static,
         Fut: Future<Output = Result<T, anyhow::Error>> + Send + 'static,
     {
-        let mut receiver = match self.lookup(clock, calculate) {
+        let mut receiver = match self.lookup(clock, bound, calculate) {
             Lookup::Fresh(value) => return Ok(value),
             Lookup::Wait(receiver) => receiver,
         };
@@ -145,7 +159,7 @@ impl<T: Block> Slot<T> {
         published.unwrap_or(Err(DomainError::Unexpected))
     }
 
-    fn lookup<F, Fut>(self: &Arc<Self>, clock: &ClockMs, calculate: F) -> Lookup<T>
+    fn lookup<F, Fut>(self: &Arc<Self>, clock: &ClockMs, bound: Duration, calculate: F) -> Lookup<T>
     where
         F: FnOnce(i64) -> Fut + Send + 'static,
         Fut: Future<Output = Result<T, anyhow::Error>> + Send + 'static,
@@ -168,7 +182,7 @@ impl<T: Block> Slot<T> {
         // No `.await` between registering the flight and handing it to its guard, so a
         // dropped request cannot leave a registered flight without one.
         let flight = Flight { slot: Arc::clone(self), landed: None };
-        tokio::spawn(fly(flight, Arc::clone(clock), calculate));
+        tokio::spawn(fly(flight, Arc::clone(clock), bound, calculate));
         Lookup::Wait(receiver)
     }
 }
@@ -208,19 +222,29 @@ impl<T: Block> Drop for Flight<T> {
     }
 }
 
-/// The detached calculation behind one flight. The flight lands when `flight` drops.
-async fn fly<T, F, Fut>(mut flight: Flight<T>, clock: ClockMs, calculate: F)
+/// The detached calculation behind one flight, cut after `bound`. The flight lands when
+/// `flight` drops.
+async fn fly<T, F, Fut>(mut flight: Flight<T>, clock: ClockMs, bound: Duration, calculate: F)
 where
     T: Block,
     F: FnOnce(i64) -> Fut,
     Fut: Future<Output = Result<T, anyhow::Error>>,
 {
     let as_of_ms = clock();
-    flight.landed = Some(match calculate(as_of_ms).await {
-        Ok(value) => Ok(Stored { value: Arc::new(value), stored_at_ms: clock() }),
-        Err(err) => {
+    flight.landed = Some(match tokio::time::timeout(bound, calculate(as_of_ms)).await {
+        Ok(Ok(value)) => Ok(Stored { value: Arc::new(value), stored_at_ms: clock() }),
+        Ok(Err(err)) => {
             error!(?err, slot = flight.slot.name, as_of_ms, "inference stats calculation failed");
             Err(err.downcast_ref::<DomainError>().copied().unwrap_or(DomainError::Unexpected))
+        }
+        Err(_elapsed) => {
+            error!(
+                slot = flight.slot.name,
+                as_of_ms,
+                bound_ms = bound.as_millis() as u64,
+                "inference stats calculation did not finish within its bound and was cut"
+            );
+            Err(DomainError::RequestTimeout)
         }
     });
 }
@@ -228,6 +252,8 @@ where
 pub(crate) struct InferenceStatsCache {
     repo: SharedInferenceRepo,
     clock: ClockMs,
+    /// `FLIGHT_TIMEOUT`; only tests shorten it.
+    flight_timeout: Duration,
     volume_24h: Arc<Slot<InferenceStatsVolume24h>>,
     history_14d: Arc<Slot<InferenceStatsHistory>>,
     history_30d: Arc<Slot<InferenceStatsHistory>>,
@@ -239,11 +265,19 @@ impl InferenceStatsCache {
         Self {
             repo,
             clock,
+            flight_timeout: FLIGHT_TIMEOUT,
             volume_24h: Slot::new("volume24h", VOLUME_24H_TTL_MS),
             history_14d: Slot::new(InferenceStatsPeriod::Days14.as_str(), HISTORY_TTL_MS),
             history_30d: Slot::new(InferenceStatsPeriod::Days30.as_str(), HISTORY_TTL_MS),
             history_all: Slot::new(InferenceStatsPeriod::All.as_str(), HISTORY_ALL_TTL_MS),
         }
+    }
+
+    /// Shortens the bound on each calculation, so a test can reach it.
+    #[cfg(test)]
+    pub(crate) fn with_flight_timeout(mut self, bound: Duration) -> Self {
+        self.flight_timeout = bound;
+        self
     }
 
     fn history_slot(&self, period: InferenceStatsPeriod) -> &Arc<Slot<InferenceStatsHistory>> {
@@ -290,7 +324,7 @@ impl InferenceStatsCache {
     ) -> Result<Arc<InferenceStatsHistory>, DomainError> {
         let repo = Arc::clone(&self.repo);
         self.history_slot(period)
-            .get(&self.clock, move |as_of_ms| async move {
+            .get(&self.clock, self.flight_timeout, move |as_of_ms| async move {
                 repo.inference_stats_history(period, as_of_ms).await
             })
             .await
@@ -299,7 +333,7 @@ impl InferenceStatsCache {
     pub(crate) async fn volume_24h(&self) -> Result<Arc<InferenceStatsVolume24h>, DomainError> {
         let repo = Arc::clone(&self.repo);
         self.volume_24h
-            .get(&self.clock, move |as_of_ms| async move {
+            .get(&self.clock, self.flight_timeout, move |as_of_ms| async move {
                 repo.inference_stats_volume_24h(as_of_ms).await
             })
             .await
@@ -321,6 +355,7 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
     use std::sync::Mutex;
+    use std::time::Duration;
 
     use anyhow::anyhow;
     use async_trait::async_trait;
@@ -468,12 +503,23 @@ mod tests {
 
     impl Fixture {
         fn new(repo: StubRepo, start_ms: i64) -> Self {
+            Self::build(repo, start_ms, None)
+        }
+
+        fn with_flight_timeout(repo: StubRepo, start_ms: i64, bound: Duration) -> Self {
+            Self::build(repo, start_ms, Some(bound))
+        }
+
+        fn build(repo: StubRepo, start_ms: i64, flight_timeout: Option<Duration>) -> Self {
             let repo = Arc::new(repo);
             let now_ms = Arc::new(AtomicI64::new(start_ms));
             let read = Arc::clone(&now_ms);
             let clock: ClockMs = Arc::new(move || read.load(Ordering::SeqCst));
-            let cache = Arc::new(InferenceStatsCache::new(Arc::clone(&repo) as _, clock));
-            Self { cache, repo, now_ms }
+            let mut cache = InferenceStatsCache::new(Arc::clone(&repo) as _, clock);
+            if let Some(bound) = flight_timeout {
+                cache = cache.with_flight_timeout(bound);
+            }
+            Self { cache: Arc::new(cache), repo, now_ms }
         }
 
         fn set_clock(&self, ms: i64) {
@@ -737,6 +783,24 @@ mod tests {
         );
 
         f.repo.panic.store(false, Ordering::SeqCst);
+        assert!(f.cache.history(InferenceStatsPeriod::Days14).await.is_ok());
+        assert_eq!(f.history_calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_calculation_that_never_returns_is_cut_and_the_slot_recovers() {
+        // The only test that waits on real time: ~20 ms for the bound to fire. The held
+        // calculation can end no other way, and the second one finds the gate already
+        // open, so it completes on its first poll — before its own bound is consulted.
+        let f = Fixture::with_flight_timeout(StubRepo::gated(), T0, Duration::from_millis(20));
+        assert_eq!(
+            f.cache.history(InferenceStatsPeriod::Days14).await,
+            Err(DomainError::RequestTimeout)
+        );
+        assert_eq!(f.history_calls(), 1);
+        assert_eq!(f.joiners(InferenceStatsPeriod::Days14), 0);
+
+        f.repo.open_gate();
         assert!(f.cache.history(InferenceStatsPeriod::Days14).await.is_ok());
         assert_eq!(f.history_calls(), 2);
     }
