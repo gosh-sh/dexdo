@@ -1,8 +1,8 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
-// Pure assembly of `GET /api/v1/inference/stats`: turns the per-day SQL
-// aggregate groups into the response blocks. No I/O; exact `BigUint`
-// arithmetic only.
+// Backing of `GET /api/v1/inference/stats`: the two aggregate statements, and the pure
+// assembly that turns their per-day groups into the response blocks. SQL sums raw
+// integers and returns them as text; Rust adds them as `BigUint`. No floats.
 
 use std::collections::BTreeMap;
 
@@ -11,6 +11,7 @@ use anyhow::Context;
 use chrono::DateTime;
 use chrono::Days;
 use chrono::NaiveDate;
+use chrono::NaiveTime;
 use chrono::Utc;
 use dodex_domain::DomainError;
 use dodex_domain::InferenceStatsDay;
@@ -20,9 +21,13 @@ use dodex_domain::InferenceStatsPreviousPeriod;
 use dodex_domain::InferenceStatsTotals;
 use dodex_domain::InferenceStatsVolume24h;
 use num_bigint::BigUint;
+use sqlx::Row;
 use tracing::warn;
 
+use crate::inference_reconciler::QUANTITY_PRECISION;
+use crate::inference_reconciler::QUOTE_TOKEN_TYPE_SHELL;
 use crate::postgres_repo::validate_decimal_scale;
+use crate::postgres_repo::PostgresReadModelRepository;
 use crate::postgres_repo::MAX_DECIMAL_PRECISION;
 
 /// One SQL group: raw sums for one day at one pair of scales.
@@ -219,6 +224,204 @@ fn rescale(raw: &str, scale: u32, day: NaiveDate) -> anyhow::Result<BigUint> {
     }
     let value: BigUint = raw.parse().map_err(|_| inconsistent())?;
     Ok(value * BigUint::from(10u32).pow(MAX_DECIMAL_PRECISION - scale))
+}
+
+/// Which statement shape to build. The text is assembled per shape, never a NULL bind
+/// inside an `$n is null or ...` disjunction: that can cost the `chain_time` index under
+/// a generic plan.
+#[derive(Clone, Copy)]
+enum StatsKind {
+    /// Bounded period: per-day groups from the previous period's start, plus the two
+    /// coverage probes. Binds `$1` cutoff, `$2` previous start, `$3` selected start.
+    History,
+    /// `all`: per-day groups up to the cutoff, no probes. Binds `$1` cutoff.
+    AllTime,
+    /// Rolling 24 hours: groups without a day. Binds `$1` cutoff, `$2` window start.
+    Volume,
+}
+
+/// The aggregate statement for `kind`. Binds follow the kind's own, then the quantity
+/// precision fallback, the SHELL token type, and (when `scoped`) the book addresses.
+fn stats_sql(kind: StatsKind, scoped: bool) -> String {
+    let (qty_fallback, quote_fallback) = match kind {
+        StatsKind::History => (4, 5),
+        StatsKind::AllTime => (2, 3),
+        StatsKind::Volume => (3, 4),
+    };
+    let scope = quote_fallback + 1;
+    let mut sql = String::new();
+    if let StatsKind::History = kind {
+        let probe_book = if scoped {
+            format!(" and b.orderbook_address = any(${scope})")
+        } else {
+            String::new()
+        };
+        let probe_events =
+            if scoped { format!(" and r.src_address = any(${scope})") } else { String::new() };
+        sql.push_str(&format!(
+            "with ev as (
+    select exists(select 1 from inference_trades b
+                   where b.chain_time < $2{probe_book}) as execution_before_previous,
+           exists(select 1 from raw_events r
+                   where r.processed_at is null
+                     and (r.created_at_chain is null
+                          or (r.created_at_chain >= $2 and r.created_at_chain < $3))
+                     and (r.event_type = 'InferenceOrderBook.InferenceFilled'
+                          or exists(select 1 from inference_markets k
+                                     where k.orderbook_address = r.src_address)){probe_events}
+                 ) as unprojected_in_previous
+)
+"
+        ));
+    }
+    if matches!(kind, StatsKind::Volume) {
+        sql.push_str("select ");
+    } else {
+        sql.push_str("select (t.chain_time at time zone 'UTC')::date as day,\n       ");
+    }
+    sql.push_str(&format!(
+        "coalesce(m.quantity_precision, ${qty_fallback})      as qty_scale,
+       rt.decimals                             as quote_scale,
+       sum(t.qty)::text                        as ticks_raw,
+       sum(t.price * t.qty)::text              as quote_raw,
+       count(*)                                as fills"
+    ));
+    if let StatsKind::History = kind {
+        sql.push_str(",\n       ev.execution_before_previous,\n       ev.unprojected_in_previous");
+    }
+    sql.push_str("\n  from inference_trades t\n");
+    if let StatsKind::History = kind {
+        sql.push_str(" cross join ev\n");
+    }
+    sql.push_str(&format!(
+        "  left join inference_markets m on m.orderbook_address = t.orderbook_address
+  left join ref_tokens rt on rt.token_type = coalesce(m.quote_token_type, ${quote_fallback})
+ where "
+    ));
+    if !matches!(kind, StatsKind::AllTime) {
+        sql.push_str("t.chain_time >= $2\n   and ");
+    }
+    sql.push_str("t.chain_time < $1");
+    if scoped {
+        sql.push_str(&format!("\n   and t.orderbook_address = any(${scope})"));
+    }
+    sql.push_str(match kind {
+        StatsKind::History => {
+            "\n group by 1, 2, 3, ev.execution_before_previous, ev.unprojected_in_previous"
+        }
+        StatsKind::AllTime => "\n group by 1, 2, 3",
+        StatsKind::Volume => "\n group by 1, 2",
+    });
+    sql
+}
+
+/// UTC midnight starting `day`.
+fn start_of(day: NaiveDate) -> DateTime<Utc> {
+    day.and_time(NaiveTime::MIN).and_utc()
+}
+
+impl PostgresReadModelRepository {
+    /// `inference_stats_history` restricted to the given book addresses, so a test can
+    /// assert exact figures over just the rows it seeded — immune to a concurrent writer
+    /// elsewhere in the shared test DB. Same statement as production, plus the book filter.
+    pub async fn inference_stats_history_for(
+        &self,
+        period: InferenceStatsPeriod,
+        as_of_ms: i64,
+        scope: &[String],
+    ) -> anyhow::Result<InferenceStatsHistory> {
+        self.stats_history(period, as_of_ms, Some(scope)).await
+    }
+
+    /// `inference_stats_volume_24h` restricted to the given book addresses.
+    pub async fn inference_stats_volume_24h_for(
+        &self,
+        as_of_ms: i64,
+        scope: &[String],
+    ) -> anyhow::Result<InferenceStatsVolume24h> {
+        self.stats_volume_24h(as_of_ms, Some(scope)).await
+    }
+
+    pub(crate) async fn stats_history(
+        &self,
+        period: InferenceStatsPeriod,
+        as_of_ms: i64,
+        scope: Option<&[String]>,
+    ) -> anyhow::Result<InferenceStatsHistory> {
+        let window = history_window(period, as_of_ms)?;
+        let bounded = window.selected_from.zip(window.previous_from);
+        let kind = if bounded.is_some() { StatsKind::History } else { StatsKind::AllTime };
+        let sql = stats_sql(kind, scope.is_some());
+        let mut query = sqlx::query(&sql).bind(window.as_of);
+        if let Some((selected_from, previous_from)) = bounded {
+            query = query.bind(start_of(previous_from)).bind(start_of(selected_from));
+        }
+        query = query.bind(QUANTITY_PRECISION).bind(QUOTE_TOKEN_TYPE_SHELL);
+        if let Some(scope) = scope {
+            query = query.bind(scope);
+        }
+        let rows = query.fetch_all(self.pool()).await.context("inference stats history")?;
+
+        // No rows means no executions in range: the evidence is irrelevant then, because
+        // `previous_period` is withheld while the selected period has no fills.
+        let mut evidence =
+            CoverageEvidence { execution_before_previous: false, unprojected_in_previous: false };
+        if let (Some(row), true) = (rows.first(), bounded.is_some()) {
+            evidence.execution_before_previous = row.try_get("execution_before_previous")?;
+            evidence.unprojected_in_previous = row.try_get("unprojected_in_previous")?;
+        }
+        let groups = rows
+            .iter()
+            .map(|row| {
+                Ok(StatsGroup {
+                    day: row.try_get("day")?,
+                    qty_scale: row.try_get("qty_scale")?,
+                    quote_scale: row.try_get("quote_scale")?,
+                    ticks_raw: row.try_get("ticks_raw")?,
+                    quote_raw: row.try_get("quote_raw")?,
+                    fills: row.try_get("fills")?,
+                })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()
+            .context("decode inference stats groups")?;
+        assemble_history(period, &window, groups, evidence)
+    }
+
+    pub(crate) async fn stats_volume_24h(
+        &self,
+        as_of_ms: i64,
+        scope: Option<&[String]>,
+    ) -> anyhow::Result<InferenceStatsVolume24h> {
+        let as_of = DateTime::<Utc>::from_timestamp_millis(as_of_ms)
+            .with_context(|| format!("as_of_ms {as_of_ms} is out of range"))?;
+        let sql = stats_sql(StatsKind::Volume, scope.is_some());
+        let mut query = sqlx::query(&sql)
+            .bind(as_of)
+            .bind(as_of - chrono::Duration::hours(24))
+            .bind(QUANTITY_PRECISION)
+            .bind(QUOTE_TOKEN_TYPE_SHELL);
+        if let Some(scope) = scope {
+            query = query.bind(scope);
+        }
+        let rows = query.fetch_all(self.pool()).await.context("inference stats volume 24h")?;
+        // The day only labels a group in diagnostics; the 24 h block has no day axis.
+        let day = as_of.date_naive();
+        let groups = rows
+            .iter()
+            .map(|row| {
+                Ok(StatsGroup {
+                    day,
+                    qty_scale: row.try_get("qty_scale")?,
+                    quote_scale: row.try_get("quote_scale")?,
+                    ticks_raw: row.try_get("ticks_raw")?,
+                    quote_raw: row.try_get("quote_raw")?,
+                    fills: row.try_get("fills")?,
+                })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()
+            .context("decode inference stats volume groups")?;
+        assemble_volume(as_of_ms, groups)
+    }
 }
 
 #[cfg(test)]

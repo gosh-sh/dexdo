@@ -22,6 +22,9 @@ use dodex_domain::InferenceDepthSnapshot;
 use dodex_domain::InferenceMarket;
 use dodex_domain::InferenceMarketStatus;
 use dodex_domain::InferenceMarketsPage;
+use dodex_domain::InferenceStatsHistory;
+use dodex_domain::InferenceStatsPeriod;
+use dodex_domain::InferenceStatsVolume24h;
 use dodex_domain::LiquidityFilter;
 use dodex_domain::PriceLevel;
 use dodex_domain::Trade;
@@ -283,6 +286,21 @@ impl InferenceReadRepository for PostgresReadModelRepository {
         limit: u16,
     ) -> Result<Vec<Trade>, anyhow::Error> {
         list_inference_trades_impl(self, orderbook_address, limit).await
+    }
+
+    async fn inference_stats_history(
+        &self,
+        period: InferenceStatsPeriod,
+        as_of_ms: i64,
+    ) -> Result<InferenceStatsHistory, anyhow::Error> {
+        self.stats_history(period, as_of_ms, None).await
+    }
+
+    async fn inference_stats_volume_24h(
+        &self,
+        as_of_ms: i64,
+    ) -> Result<InferenceStatsVolume24h, anyhow::Error> {
+        self.stats_volume_24h(as_of_ms, None).await
     }
 }
 
