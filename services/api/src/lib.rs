@@ -4,6 +4,9 @@
 mod auth_hoop;
 mod dto;
 mod inference;
+// No caller yet: the stats handler wiring lands in the next commit.
+#[allow(dead_code)]
+mod inference_stats_cache;
 #[doc(hidden)]
 pub mod testkit;
 mod timeout_hoop;
