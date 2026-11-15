@@ -204,6 +204,34 @@ async fn seed_pending_event(
     .expect("seed pending event");
 }
 
+/// Reference totals from a plain query over the given books and the half-open interval
+/// `[from, to)` (`from` None = unbounded), independent of the production statements. Every
+/// book in this suite is SHELL with quantity precision 0, so the raw notional divided by
+/// 10^9 and trimmed is the canonical decimal.
+async fn reference_totals(
+    pool: &PgPool,
+    obs: &[&str],
+    from: Option<&str>,
+    to: &str,
+) -> InferenceStatsTotals {
+    let (ticks, quote, fills): (String, String, i64) = sqlx::query_as(
+        "select coalesce(sum(qty), 0)::text, \
+                coalesce(trim_scale(sum(price * qty) / 1000000000), 0)::text, \
+                count(*) \
+           from inference_trades \
+          where orderbook_address = any($1) and chain_time is not null \
+            and chain_time < $2::text::timestamptz \
+            and ($3::text is null or chain_time >= $3::text::timestamptz)",
+    )
+    .bind(scope(obs))
+    .bind(to)
+    .bind(from)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    InferenceStatsTotals { ticks, quote, fills: fills as u64 }
+}
+
 /// The nine trades of the 14-day scenario, ids `<prefix>-1` .. `<prefix>-9`.
 async fn seed_w14(pool: &PgPool, ob: &str, prefix: &str) {
     let rows: [(&str, &str, Option<&str>); 9] = [
@@ -254,19 +282,12 @@ async fn window_14d_day_boundaries_cutoff_and_previous_period() {
     assert_eq!((p.from.as_str(), p.to.as_str()), ("2026-09-26", "2026-10-10"));
     assert_eq!(p.totals, t("5", "7", 2));
 
-    // Reference: a plain sum over the same rows and interval agrees.
-    let (ticks, fills): (String, i64) = sqlx::query_as(
-        "select sum(qty)::text, count(*) from inference_trades \
-          where orderbook_address = $1 \
-            and chain_time >= $2::text::timestamptz and chain_time < $3::text::timestamptz",
-    )
-    .bind(OB)
-    .bind("2026-10-10T00:00:00Z")
-    .bind(AS_OF)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!((ticks, fills as u64), (h.totals.ticks.clone(), h.totals.fills));
+    // Reference: a plain query over the same rows and intervals agrees.
+    assert_eq!(h.totals, reference_totals(&pool, &[OB], Some("2026-10-10T00:00:00Z"), AS_OF).await);
+    assert_eq!(
+        p.totals,
+        reference_totals(&pool, &[OB], Some("2026-09-26T00:00:00Z"), "2026-10-10T00:00:00Z").await
+    );
 
     // A recovered chain_time lands on its own historical day.
     sqlx::query(
@@ -331,6 +352,11 @@ async fn window_30d_boundaries() {
     let p = h.previous_period.unwrap();
     assert_eq!((p.from.as_str(), p.to.as_str()), ("2026-08-25", "2026-09-24"));
     assert_eq!(p.totals, t("2", "2", 2));
+    assert_eq!(h.totals, reference_totals(&pool, &[OB], Some("2026-09-24T00:00:00Z"), AS_OF).await);
+    assert_eq!(
+        p.totals,
+        reference_totals(&pool, &[OB], Some("2026-08-25T00:00:00Z"), "2026-09-24T00:00:00Z").await
+    );
 
     purge(&pool, &[OB]).await;
 }
@@ -357,6 +383,7 @@ async fn all_period_spans_first_execution_to_today_and_empty_scope_is_empty() {
     );
     assert_eq!(h.per_day[4].totals, t("0", "0", 0));
     assert!(h.previous_period.is_none());
+    assert_eq!(h.totals, reference_totals(&pool, &[OB], None, "2026-10-05T09:00:00Z").await);
     // a scope with no trades at all
     let e = repo
         .inference_stats_history_for(InferenceStatsPeriod::All, cutoff, &scope(&[EMPTY]))
@@ -471,6 +498,7 @@ async fn volume_24h_uses_exact_timestamps() {
     let v = repo.inference_stats_volume_24h_for(as_of_ms(), &scope(&[OB])).await.unwrap();
     assert_eq!(v.as_of_ms, as_of_ms());
     assert_eq!(v.totals, t("2", "2", 2));
+    assert_eq!(v.totals, reference_totals(&pool, &[OB], Some("2026-10-22T12:00:00Z"), AS_OF).await);
 
     purge(&pool, &[OB]).await;
 }
