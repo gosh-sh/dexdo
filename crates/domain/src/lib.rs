@@ -442,6 +442,82 @@ pub struct Trade {
     pub is_buyer_maker: bool,
 }
 
+/// Window selector of `GET /api/v1/inference/stats`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum InferenceStatsPeriod {
+    Days14,
+    Days30,
+    All,
+}
+
+impl InferenceStatsPeriod {
+    /// Exact tokens only: `"14d"`, `"30d"`, `"all"`.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "14d" => Some(Self::Days14),
+            "30d" => Some(Self::Days30),
+            "all" => Some(Self::All),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Days14 => "14d",
+            Self::Days30 => "30d",
+            Self::All => "all",
+        }
+    }
+
+    /// Window length in UTC days; `None` for `All`.
+    pub fn days(self) -> Option<u32> {
+        match self {
+            Self::Days14 => Some(14),
+            Self::Days30 => Some(30),
+            Self::All => None,
+        }
+    }
+}
+
+/// Executed volume over some span: `ticks` and `quote` are canonical decimal
+/// strings (no trailing fractional zeros), `fills` is the number of fills.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InferenceStatsTotals {
+    pub ticks: String,
+    pub quote: String,
+    pub fills: u64,
+}
+
+/// One UTC day (`YYYY-MM-DD`) of executed volume.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InferenceStatsDay {
+    pub day: String,
+    pub totals: InferenceStatsTotals,
+}
+
+/// The interval just before the selected period, `from` inclusive and `to`
+/// exclusive (`YYYY-MM-DD`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InferenceStatsPreviousPeriod {
+    pub from: String,
+    pub to: String,
+    pub totals: InferenceStatsTotals,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InferenceStatsHistory {
+    pub as_of_ms: i64,
+    pub per_day: Vec<InferenceStatsDay>,
+    pub totals: InferenceStatsTotals,
+    pub previous_period: Option<InferenceStatsPreviousPeriod>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InferenceStatsVolume24h {
+    pub as_of_ms: i64,
+    pub totals: InferenceStatsTotals,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrderIdentity {
     Chain(String),
@@ -1410,6 +1486,21 @@ pub struct MarketBalances {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inference_stats_period_parses_exact_tokens() {
+        for p in
+            [InferenceStatsPeriod::Days14, InferenceStatsPeriod::Days30, InferenceStatsPeriod::All]
+        {
+            assert_eq!(InferenceStatsPeriod::parse(p.as_str()), Some(p));
+        }
+        assert_eq!(InferenceStatsPeriod::Days14.days(), Some(14));
+        assert_eq!(InferenceStatsPeriod::Days30.days(), Some(30));
+        assert_eq!(InferenceStatsPeriod::All.days(), None);
+        for bad in ["ALL", "14D", "", "7d", " 14d"] {
+            assert_eq!(InferenceStatsPeriod::parse(bad), None, "{bad:?}");
+        }
+    }
 
     #[test]
     fn permission_as_str_round_trip() {
