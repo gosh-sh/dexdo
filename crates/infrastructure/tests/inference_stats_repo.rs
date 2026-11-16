@@ -558,17 +558,11 @@ async fn previous_period_coverage() {
     delete_event("cov-ev-2").await;
     assert!(prev().await.is_some());
 
-    // 7. a pending InferenceFilled with an unknown date
-    seed_pending_event(&pool, OB, "cov-ev-3", Some(FILLED), None).await;
-    assert!(prev().await.is_none());
-    delete_event("cov-ev-3").await;
-    assert!(prev().await.is_some());
-
-    // 8. a pending InferenceFilled inside the selected period is not the previous interval
+    // 7. a pending InferenceFilled inside the selected period is not the previous interval
     seed_pending_event(&pool, OB, "cov-ev-4", Some(FILLED), Some("2026-10-21T10:00:00Z")).await;
     assert!(prev().await.is_some());
 
-    // 9. no execution left in the selected period
+    // 8. no execution left in the selected period
     sqlx::query("delete from inference_trades where trade_id = 'cov-1'")
         .execute(&pool)
         .await

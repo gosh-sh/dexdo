@@ -279,8 +279,7 @@ fn stats_sql(kind: StatsKind, scoped: bool) -> String {
                    where b.chain_time < $2{probe_book}) as execution_before_previous,
            exists(select 1 from raw_events r
                    where r.processed_at is null
-                     and (r.created_at_chain is null
-                          or (r.created_at_chain >= $2 and r.created_at_chain < $3))
+                     and r.created_at_chain >= $2 and r.created_at_chain < $3
                      and (r.event_type = 'InferenceOrderBook.InferenceFilled'
                           or exists(select 1 from inference_markets k
                                      where k.orderbook_address = r.src_address)){probe_events}
