@@ -187,7 +187,13 @@ async fn seed_trade(
     .expect("seed trade");
 }
 
-/// Unprojected raw event: processed_at NULL, decoded '{}', chain_order = msg_id.
+/// Unprojected raw event: processed_at NULL, chain_order = msg_id.
+///
+/// `decoded` is left NULL on purpose. The coverage probe does not read it, while the
+/// projector's own queue is every row with `processed_at IS NULL AND event_type IS NOT NULL
+/// AND decoded IS NOT NULL`, read table-wide (`max_pending_chain_order`, `has_pending_above`,
+/// the reprojection loop). A decoded row seeded here would join that queue in the shared
+/// test database and race the `reprojection` suite, which asserts on its head.
 async fn seed_pending_event(
     pool: &PgPool,
     ob: &str,
@@ -199,7 +205,7 @@ async fn seed_pending_event(
         r#"insert into raw_events
                (msg_id, src_address, event_type, chain_order, decoded, processed_at,
                 created_at_chain)
-           values ($1, $2, $3, $1, '{}'::jsonb, null, $4::text::timestamptz)"#,
+           values ($1, $2, $3, $1, null, null, $4::text::timestamptz)"#,
     )
     .bind(msg_id)
     .bind(ob)
