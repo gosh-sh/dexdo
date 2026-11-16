@@ -1227,15 +1227,16 @@ Response:
   "asOf": 1792756800000,
   "perDay": [
     { "day": "2026-10-10", "ticks": "0", "quote": "0", "fills": "0" },
+    { "day": "2026-10-22", "ticks": "3", "quote": "24", "fills": "1" },
     { "day": "2026-10-23", "ticks": "9", "quote": "108", "fills": "3" }
   ],
-  "totals": { "ticks": "9", "quote": "108", "fills": "3" },
+  "totals": { "ticks": "12", "quote": "132", "fills": "4" },
   "previousPeriod": {
     "from": "2026-09-26",
     "to": "2026-10-10",
     "totals": { "ticks": "5", "quote": "7.5", "fills": "2" }
   },
-  "volume24h": { "ticks": "4", "quote": "48", "fills": "2", "asOf": 1792756860000 }
+  "volume24h": { "ticks": "12", "quote": "132", "fills": "4", "asOf": 1792756860000 }
 }
 ```
 
@@ -1272,9 +1273,9 @@ What counts as an execution: every row of the trade tape with a known execution 
 - It is `null` for `period=all`.
 - For `14d` and `30d` it is an object only when all of the following hold, and `null` otherwise: the tape holds an execution before the previous interval; the tape holds an execution inside the selected period; and no event that could be an execution inside the previous interval is still waiting to be applied by the indexer.
 - This is a heuristic that withholds the comparison when the service has a reason to doubt it. It is **not a guarantee** that the previous interval is complete: an event the chain gateway never delivered leaves no trace to check, so a returned `previousPeriod` can still understate history.
-- The cost of the heuristic: a selected period with no executions gives `null` even when history is complete; a network whose first execution falls inside the previous interval gives `null`, because the first execution says nothing about older history; and a stuck event under an inference book keeps the comparison `null` until it is repaired. A previous interval that passes the checks and has no executions is an object with zero totals.
+- The cost of the heuristic: a selected period with no executions gives `null` even when history is complete; a network whose first execution falls inside the previous interval gives `null`, because the first execution says nothing about older history; and a stuck event under an inference book withholds the comparison, with a delay, for at most the period's length — 14 days for `14d`, 30 for `30d` — or until it is repaired, whichever comes first. Only the previous interval is checked, and it moves forward one day per day: an event dated on day D has no effect for the first 14 (or 30) days, while D is inside the selected period; keeps `previousPeriod` `null` for the next 14 (or 30) days, while D is inside the previous interval; and has no effect once D is older than the previous interval. A previous interval that passes the checks and has no executions is an object with zero totals.
 
-Freshness: responses are cached by the service, so each part may be older than the request that returned it, on top of the indexing delay. `volume24h` is at most 10 minutes old, `14d` and `30d` at most 1 hour, `all` at most 4 hours. The `perDay` block is recalculated as soon as the UTC date changes, whatever its age. `asOf` and `volume24h.asOf` say exactly how old each part is; they differ.
+Freshness: responses are cached by the service, so each part may be older than the request that returned it, on top of the indexing delay. A part is served for at most a fixed time after its calculation finished — 10 minutes for `volume24h`, 1 hour for `14d` and `30d`, 4 hours for `all` — and its `asOf` is taken when the calculation starts, so a part can be older than that time by how long its calculation took. The `perDay` block is recalculated as soon as the UTC date changes, whatever its age. `asOf` and `volume24h.asOf` say exactly how old each part is; they differ.
 
 Errors:
 
@@ -1283,7 +1284,7 @@ Errors:
 | `period` blank | `-1102` | 400 |
 | `period` not `14d`, `30d` or `all`, or sent more than once | `-1130` | 400 |
 | Stored data is temporarily inconsistent | `-1500` | 503 |
-| The calculation exceeded its time bound: the database cancels a statement after 25 seconds (releasing its connection), and the whole calculation is cut after 30 seconds as a backstop | `-1007` | 504 |
+| The calculation did not finish within its time limit (about 30 seconds); the request can be retried | `-1007` | 504 |
 | Unexpected (database failure, etc.) | `-1000` | 500 |
 
 A failed calculation is never answered with partial data, and a failure is not remembered: the next request calculates again.

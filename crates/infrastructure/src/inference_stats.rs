@@ -432,6 +432,15 @@ impl PostgresReadModelRepository {
             evidence.execution_before_previous = row.try_get("execution_before_previous")?;
             evidence.unprojected_in_previous = row.try_get("unprojected_in_previous")?;
         }
+        // The one reason for a withheld comparison that an operator can act on; the other
+        // two (no execution before the previous interval, none in the selected period) are
+        // normal states of the tape and stay silent.
+        if evidence.unprojected_in_previous {
+            warn!(
+                period = period.as_str(),
+                "inference stats previousPeriod withheld: an unprojected event that may be an execution is dated inside the previous interval (read-api.md#coverage-of-previousperiod)"
+            );
+        }
         let groups = rows
             .iter()
             .map(|row| {

@@ -69,6 +69,10 @@ async fn setup() -> Option<PgPool> {
 /// and dropping that schema would take the extension with it). The pool's `search_path`
 /// is the private schema only, so `_sqlx_migrations` is looked up there and not found in
 /// `public`.
+///
+/// The session time zone is UTC+14, so a statement that ever stops bucketing days
+/// explicitly in UTC moves executions to other days and fails these tests. Every instant
+/// the helpers bind is RFC 3339 with `Z` (or an epoch), which the session zone cannot shift.
 async fn isolated_pool(name: &str) -> Option<PgPool> {
     let public = setup().await?;
     public.execute(format!("drop schema if exists {name} cascade").as_str()).await.unwrap();
@@ -81,6 +85,7 @@ async fn isolated_pool(name: &str) -> Option<PgPool> {
             let path = path.clone();
             Box::pin(async move {
                 conn.execute(path.as_str()).await?;
+                conn.execute("set time zone 'Pacific/Kiritimati'").await?;
                 Ok(())
             })
         })
@@ -508,15 +513,21 @@ async fn volume_24h_uses_exact_timestamps() {
 async fn previous_period_coverage() {
     let Some(pool) = setup().await else { return };
     const OB: &str = "0:inf_stats_cov";
+    // An address that emits events but is no inference book: no `inference_markets` row.
+    const NOT_A_BOOK: &str = "0:inf_stats_cov_not_a_book";
     const FILLED: &str = "InferenceOrderBook.InferenceFilled";
-    purge(&pool, &[OB]).await;
+    purge(&pool, &[OB, NOT_A_BOOK]).await;
     seed_market(&pool, OB).await;
     let repo = PostgresReadModelRepository::new(pool.clone());
     let prev = || async {
-        repo.inference_stats_history_for(InferenceStatsPeriod::Days14, as_of_ms(), &scope(&[OB]))
-            .await
-            .unwrap()
-            .previous_period
+        repo.inference_stats_history_for(
+            InferenceStatsPeriod::Days14,
+            as_of_ms(),
+            &scope(&[OB, NOT_A_BOOK]),
+        )
+        .await
+        .unwrap()
+        .previous_period
     };
     let delete_event = |msg_id: &'static str| {
         let pool = pool.clone();
@@ -533,43 +544,78 @@ async fn previous_period_coverage() {
     seed_trade(&pool, OB, "cov-1", "1000000000", "1", Some("2026-10-20T10:00:00Z")).await;
     assert!(prev().await.is_none());
 
-    // 2. + a trade before the previous interval: bracketed, nothing inside it
-    seed_trade(&pool, OB, "cov-2", "1000000000", "1", Some("2026-09-20T10:00:00Z")).await;
+    // 2. + a trade inside the previous interval and nothing before it: a young network,
+    //    whose first execution says nothing about older history
+    seed_trade(&pool, OB, "cov-2", "1000000000", "1", Some("2026-10-01T10:00:00Z")).await;
+    assert!(prev().await.is_none(), "an execution inside the previous interval is not before it");
+
+    // 3. + a trade at the previous interval's first instant: inside it, not before it
+    seed_trade(&pool, OB, "cov-3", "1000000000", "1", Some("2026-09-26T00:00:00Z")).await;
+    assert!(prev().await.is_none(), "the previous interval's start is inside it");
+
+    // 4. + a trade one second before that: bracketed, both trades above inside
+    seed_trade(&pool, OB, "cov-4", "1000000000", "1", Some("2026-09-25T23:59:59Z")).await;
+    assert_eq!(prev().await.expect("bracketed").totals, t("2", "2", 2));
+
+    // 5. bracketed, nothing inside the previous interval
+    sqlx::query("delete from inference_trades where trade_id in ('cov-2', 'cov-3')")
+        .execute(&pool)
+        .await
+        .unwrap();
     assert_eq!(prev().await.expect("bracketed").totals, t("0", "0", 0));
 
-    // 3. + a trade inside the previous interval
-    seed_trade(&pool, OB, "cov-3", "1000000000", "1", Some("2026-10-01T10:00:00Z")).await;
+    // 6. + a trade inside the previous interval
+    seed_trade(&pool, OB, "cov-5", "1000000000", "1", Some("2026-10-01T10:00:00Z")).await;
     assert_eq!(prev().await.expect("bracketed").totals, t("1", "1", 1));
 
-    // 4. + a pending InferenceFilled inside the previous interval withholds it
+    // 7. + a pending InferenceFilled inside the previous interval withholds it
     seed_pending_event(&pool, OB, "cov-ev-1", Some(FILLED), Some("2026-10-02T10:00:00Z")).await;
     assert!(prev().await.is_none());
 
-    // 5. once processed, the event no longer counts
+    // 8. once processed, the event no longer counts
     sqlx::query("update raw_events set processed_at = now() where msg_id = 'cov-ev-1'")
         .execute(&pool)
         .await
         .unwrap();
     assert!(prev().await.is_some());
 
-    // 6. a pending event of unknown type under this book, inside the interval
+    // 9. a pending event of unknown type under this book, inside the interval
     seed_pending_event(&pool, OB, "cov-ev-2", None, Some("2026-10-02T10:00:00Z")).await;
     assert!(prev().await.is_none());
     delete_event("cov-ev-2").await;
     assert!(prev().await.is_some());
 
-    // 7. a pending InferenceFilled inside the selected period is not the previous interval
+    // 10. a pending event of another kind, from an address that is no inference book,
+    //     inside the interval: it cannot be an execution, so it withholds nothing
+    seed_pending_event(
+        &pool,
+        NOT_A_BOOK,
+        "cov-ev-5",
+        Some("OrderBook.OrderFilled"),
+        Some("2026-10-02T10:00:00Z"),
+    )
+    .await;
+    assert!(prev().await.is_some(), "a foreign pending event is no doubt about the interval");
+
+    // 11. a pending InferenceFilled withholds it whoever emitted it: the type alone counts
+    seed_pending_event(&pool, NOT_A_BOOK, "cov-ev-6", Some(FILLED), Some("2026-10-02T10:00:00Z"))
+        .await;
+    assert!(prev().await.is_none(), "an InferenceFilled outside any known book");
+    delete_event("cov-ev-6").await;
+    assert!(prev().await.is_some());
+
+    // 12. a pending InferenceFilled inside the selected period is not the previous interval
     seed_pending_event(&pool, OB, "cov-ev-4", Some(FILLED), Some("2026-10-21T10:00:00Z")).await;
     assert!(prev().await.is_some());
 
-    // 8. no execution left in the selected period
+    // 13. no execution left in the selected period
     sqlx::query("delete from inference_trades where trade_id = 'cov-1'")
         .execute(&pool)
         .await
         .unwrap();
     assert!(prev().await.is_none());
 
-    purge(&pool, &[OB]).await;
+    purge(&pool, &[OB, NOT_A_BOOK]).await;
 }
 
 /// The real, unscoped statements — the ones production runs — in a schema nobody else writes to.
@@ -612,6 +658,25 @@ async fn unscoped_statements_in_an_isolated_schema() {
 
     let v = InferenceReadRepository::inference_stats_volume_24h(&repo, as_of_ms()).await.unwrap();
     assert_eq!(v.totals, t("15", "114", 3)); // 2026-10-22T23:59:59Z + the two of 2026-10-23
+
+    // The unscoped coverage probe ignores a pending event of another kind from an address
+    // that is no inference book, inside the previous interval: it cannot be an execution.
+    seed_pending_event(
+        &pool,
+        "0:inf_stats_iso_not_a_book",
+        "iso-pend-0",
+        Some("OrderBook.OrderFilled"),
+        Some("2026-10-02T00:00:00Z"),
+    )
+    .await;
+    let h = InferenceReadRepository::inference_stats_history(
+        &repo,
+        InferenceStatsPeriod::Days14,
+        as_of_ms(),
+    )
+    .await
+    .unwrap();
+    assert!(h.previous_period.is_some(), "a foreign pending event is no doubt about the interval");
 
     // The unscoped coverage probe: a pending fill inside the previous interval withholds it.
     seed_pending_event(
@@ -672,14 +737,15 @@ async fn a_statement_stalled_behind_a_lock_is_cancelled_by_its_statement_timeout
         .expect_err("the locked table stalls the statement past its bound");
     assert_eq!(err.downcast_ref::<DomainError>(), Some(&DomainError::RequestTimeout));
 
-    let h = repo
-        .inference_stats_history_with_statement_timeout(
-            InferenceStatsPeriod::Days14,
-            as_of_ms(),
-            BOUND,
-        )
-        .await
-        .unwrap();
+    // The production bound for the call that must succeed: `BOUND` is short enough to
+    // trip on a loaded CI database.
+    let h = InferenceReadRepository::inference_stats_history(
+        &repo,
+        InferenceStatsPeriod::Days14,
+        as_of_ms(),
+    )
+    .await
+    .unwrap();
     assert_eq!(h.totals, t("18", "118.500000003", 4));
 
     pool.close().await;

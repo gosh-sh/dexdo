@@ -239,8 +239,9 @@ where
     let started = Instant::now();
     flight.landed = Some(match tokio::time::timeout(bound, calculate(as_of_ms)).await {
         Ok(Ok(value)) => {
-            // The production signal that a cold calculation drifts toward the frontend's
-            // 4.5 s budget: the flight lands even when its requests have timed out.
+            // The production signal that a cold calculation drifts toward 4.5 s, the time
+            // the dashboard gives a request before it gives up (issue #164): the flight
+            // lands even when its requests have timed out.
             info!(
                 slot = flight.slot.name,
                 as_of_ms,

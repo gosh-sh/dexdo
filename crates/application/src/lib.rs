@@ -905,14 +905,17 @@ pub trait InferenceReadRepository: Send + Sync {
     ) -> Result<Vec<Trade>, anyhow::Error>;
 
     /// Historical block of GET /api/v1/inference/stats at the given cutoff (Unix ms).
-    /// Out-of-range precision / undecodable aggregate → `MarketInconsistent`.
+    /// Out-of-range precision / undecodable aggregate → `MarketInconsistent`; a statement
+    /// cancelled at its time bound → `RequestTimeout`.
     async fn inference_stats_history(
         &self,
         period: InferenceStatsPeriod,
         as_of_ms: i64,
     ) -> Result<InferenceStatsHistory, anyhow::Error>;
 
-    /// Rolling `[as_of - 24 h, as_of)` block.
+    /// Rolling `[as_of - 24 h, as_of)` block. Out-of-range precision / undecodable
+    /// aggregate → `MarketInconsistent`; a statement cancelled at its time bound →
+    /// `RequestTimeout`.
     async fn inference_stats_volume_24h(
         &self,
         as_of_ms: i64,

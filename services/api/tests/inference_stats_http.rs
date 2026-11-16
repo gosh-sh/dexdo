@@ -50,12 +50,14 @@ fn totals(ticks: &str, quote: &str, fills: u64) -> InferenceStatsTotals {
 struct StubStatsRepo {
     history_calls: Mutex<Vec<InferenceStatsPeriod>>,
     volume_calls: Mutex<u32>,
-    fail: Mutex<bool>,
+    fail_history: Mutex<bool>,
+    fail_volume: Mutex<bool>,
 }
 
 impl StubStatsRepo {
-    fn set_fail(&self, fail: bool) {
-        *self.fail.lock().unwrap() = fail;
+    fn set_fail(&self, history: bool, volume: bool) {
+        *self.fail_history.lock().unwrap() = history;
+        *self.fail_volume.lock().unwrap() = volume;
     }
 
     fn history_calls(&self) -> Vec<InferenceStatsPeriod> {
@@ -64,10 +66,6 @@ impl StubStatsRepo {
 
     fn volume_calls(&self) -> u32 {
         *self.volume_calls.lock().unwrap()
-    }
-
-    fn failing(&self) -> bool {
-        *self.fail.lock().unwrap()
     }
 }
 
@@ -118,7 +116,7 @@ impl InferenceReadRepository for StubStatsRepo {
         _as_of_ms: i64,
     ) -> Result<InferenceStatsHistory, anyhow::Error> {
         self.history_calls.lock().unwrap().push(period);
-        if self.failing() {
+        if *self.fail_history.lock().unwrap() {
             return Err(anyhow::anyhow!(DomainError::MarketInconsistent));
         }
         let days: i64 = match period {
@@ -155,10 +153,10 @@ impl InferenceReadRepository for StubStatsRepo {
         _as_of_ms: i64,
     ) -> Result<InferenceStatsVolume24h, anyhow::Error> {
         *self.volume_calls.lock().unwrap() += 1;
-        if self.failing() {
+        if *self.fail_volume.lock().unwrap() {
             return Err(anyhow::anyhow!(DomainError::MarketInconsistent));
         }
-        Ok(InferenceStatsVolume24h { as_of_ms: VOLUME_AS_OF_MS, totals: totals("4", "48", 2) })
+        Ok(InferenceStatsVolume24h { as_of_ms: VOLUME_AS_OF_MS, totals: totals("12", "132", 4) })
     }
 }
 
@@ -203,7 +201,7 @@ async fn default_request_is_the_14_day_block() {
     );
     assert_eq!(
         body["volume24h"],
-        json!({"ticks": "4", "quote": "48", "fills": "2", "asOf": 1792756860000_i64})
+        json!({"ticks": "12", "quote": "132", "fills": "4", "asOf": 1792756860000_i64})
     );
 }
 
@@ -255,18 +253,24 @@ async fn blank_period_is_minus_1102() {
 
 #[tokio::test]
 async fn a_failed_calculation_is_an_error_never_a_partial_200() {
-    let repo = Arc::new(StubStatsRepo::default());
-    let Some(service) = service_over(&repo).await else { return };
+    // One block failing on its own: the block that succeeded must not leak into the answer.
+    // A fresh service per case, so the succeeded block's cache slot does not carry over.
+    for (fail_history, fail_volume, succeeded) in
+        [(false, true, "perDay"), (true, false, "volume24h")]
+    {
+        let repo = Arc::new(StubStatsRepo::default());
+        let Some(service) = service_over(&repo).await else { return };
 
-    repo.set_fail(true);
-    let (status, body) = get(&service, "").await;
-    assert_eq!(status, Some(StatusCode::SERVICE_UNAVAILABLE));
-    assert_eq!(body["code"], -1500);
-    assert!(body.get("perDay").is_none());
+        repo.set_fail(fail_history, fail_volume);
+        let (status, body) = get(&service, "").await;
+        assert_eq!(status, Some(StatusCode::SERVICE_UNAVAILABLE), "{succeeded} succeeded");
+        assert_eq!(body["code"], -1500, "{succeeded} succeeded");
+        assert!(body.get(succeeded).is_none(), "{succeeded} succeeded");
 
-    repo.set_fail(false);
-    let (status, _body) = get(&service, "").await;
-    assert_eq!(status, Some(StatusCode::OK), "the failure was not cached");
+        repo.set_fail(false, false);
+        let (status, _body) = get(&service, "").await;
+        assert_eq!(status, Some(StatusCode::OK), "the failure was not cached");
+    }
 }
 
 #[tokio::test]
