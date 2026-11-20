@@ -166,8 +166,8 @@ async fn register_deployed_pn_against_shellnet() {
     assert_eq!(status, Some(StatusCode::OK), "deployed PN must register");
     assert!(reg.api_key.starts_with("dk_live_"));
     assert_eq!(reg.api_secret.len(), 64);
-    assert!(reg.permissions.contains(&"TRADE".to_string()));
-    assert!(reg.permissions.contains(&"USER_DATA".to_string()));
+    assert!(reg.permissions.iter().any(|x| x == "TRADE"));
+    assert!(reg.permissions.iter().any(|x| x == "USER_DATA"));
 
     // Re-registering the same note is insert-only: -2015 / 409.
     let mut dup = post_register(&service, &body).await;
