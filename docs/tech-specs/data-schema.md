@@ -433,6 +433,11 @@ insert-only; a replayed insert conflicts on `trade_id` and only coalesces a NULL
 conflict is skipped and `error!`-logged rather than silently overwritten), so reprojection from
 `raw_events` is idempotent.
 
+Index: `inference_trades_chain_time_idx` — `(chain_time) WHERE chain_time IS NOT NULL` (migration 0009).
+Partial, because a row with a NULL `chain_time` is never counted. Backs the time-window scans of
+`GET /api/v1/inference/stats`: the rolling 24 h volume and the 28 / 60-day history windows read a
+`chain_time` range across all books, which `inference_trades_tape_idx` (book-first) cannot serve.
+
 Recovery notes for on-call:
 
 - **Row hidden by `chain_time IS NULL`** (gateway delivered the fill without `created_at`): fix the row directly — `UPDATE inference_trades SET chain_time = to_timestamp(...) WHERE trade_id = ...`, sourcing the timestamp from the repaired `raw_events.created_at_chain`. As with [`trades`](#trades), do not clear the event's `processed_at` to force a replay while the order rows are still live — the surrounding `InferenceFilled` projection is not replay-idempotent on `inference_orders.amount_remaining`.

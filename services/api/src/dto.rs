@@ -231,6 +231,32 @@ impl From<dodex_domain::LiquidityFilter> for LiquidityFilter {
     }
 }
 
+/// Values accepted by the `GET /api/v1/inference/stats` `period` parameter.
+// Documentation-only, same rationale as `MarketsSort`: the handler parses the raw
+// string through `InferenceStatsPeriod::parse` so missing-vs-invalid error
+// fidelity survives.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, Serialize, ToSchema)]
+pub(crate) enum InferenceStatsPeriod {
+    #[serde(rename = "14d")]
+    Days14,
+    #[serde(rename = "30d")]
+    Days30,
+    #[serde(rename = "all")]
+    All,
+}
+
+impl From<dodex_domain::InferenceStatsPeriod> for InferenceStatsPeriod {
+    fn from(value: dodex_domain::InferenceStatsPeriod) -> Self {
+        use dodex_domain::InferenceStatsPeriod as D;
+        match value {
+            D::Days14 => Self::Days14,
+            D::Days30 => Self::Days30,
+            D::All => Self::All,
+        }
+    }
+}
+
 /// Order statuses accepted by the `GET /api/v1/inference/orders` `status` filter.
 /// `LIVE` means the order is in the book; whether it has passed its deadline
 /// is the separate `includeExpired` filter. See docs/api-spec.md §Inference Orders.
@@ -449,6 +475,15 @@ mod wire_value_tests {
         use dodex_domain::LiquidityFilter as D;
         for d in [D::Buy, D::Sell, D::Any, D::Both] {
             assert_eq!(wire(LiquidityFilter::from(d)), d.as_str());
+            assert_eq!(D::parse(d.as_str()), Some(d));
+        }
+    }
+
+    #[test]
+    fn inference_stats_period_matches_domain_parser() {
+        use dodex_domain::InferenceStatsPeriod as D;
+        for d in [D::Days14, D::Days30, D::All] {
+            assert_eq!(wire(InferenceStatsPeriod::from(d)), d.as_str());
             assert_eq!(D::parse(d.as_str()), Some(d));
         }
     }

@@ -4,6 +4,7 @@
 mod auth_hoop;
 mod dto;
 mod inference;
+mod inference_stats_cache;
 #[doc(hidden)]
 pub mod testkit;
 mod timeout_hoop;
@@ -137,6 +138,9 @@ pub struct AppState {
     /// `registry`, so existing `AppState::new` call sites need no change; `run`
     /// and the test harness wire it, and the handlers 500 if it is absent.
     pub(crate) inference_repo: Option<SharedInferenceRepo>,
+    /// Cache in front of `GET /api/v1/inference/stats`, over the same repository.
+    /// Set together with `inference_repo`; the handler 500s if it is absent.
+    pub(crate) inference_stats: Option<Arc<inference_stats_cache::InferenceStatsCache>>,
 }
 
 impl AppState {
@@ -164,6 +168,7 @@ impl AppState {
             max_batch_size: 10,
             registry: None,
             inference_repo: None,
+            inference_stats: None,
         }
     }
 
@@ -187,7 +192,22 @@ impl AppState {
 
     #[doc(hidden)]
     pub fn with_inference_repo(mut self, repo: SharedInferenceRepo) -> Self {
+        self.inference_stats = Some(Arc::new(inference_stats_cache::InferenceStatsCache::new(
+            repo.clone(),
+            inference_stats_cache::system_clock_ms(),
+        )));
         self.inference_repo = Some(repo);
+        self
+    }
+
+    /// Rebuilds the stats cache over the inference repository already set, with this
+    /// clock. Call after `with_inference_repo`.
+    #[doc(hidden)]
+    pub fn with_inference_stats_clock(mut self, clock: inference_stats_cache::ClockMs) -> Self {
+        if let Some(repo) = self.inference_repo.clone() {
+            self.inference_stats =
+                Some(Arc::new(inference_stats_cache::InferenceStatsCache::new(repo, clock)));
+        }
         self
     }
 }
@@ -2348,6 +2368,7 @@ pub fn build_router(state: AppState) -> Router {
         .push(Router::with_path("api/v1/inference/depth").get(inference::get_inference_depth))
         .push(Router::with_path("api/v1/inference/orders").get(inference::get_inference_orders))
         .push(Router::with_path("api/v1/inference/trades").get(inference::get_inference_trades))
+        .push(Router::with_path("api/v1/inference/stats").get(inference::get_inference_stats))
         .push(Router::with_path("api/v1/oracles").get(get_oracles))
         .push(Router::with_path("api/v1/prediction/trades").get(get_trades))
         // Registration is public — a client has no API key yet, so it
@@ -2409,7 +2430,8 @@ pub fn openapi_doc() -> OpenApi {
         .push(Router::with_path("api/v1/inference/markets").get(inference::get_inference_markets))
         .push(Router::with_path("api/v1/inference/depth").get(inference::get_inference_depth))
         .push(Router::with_path("api/v1/inference/orders").get(inference::get_inference_orders))
-        .push(Router::with_path("api/v1/inference/trades").get(inference::get_inference_trades));
+        .push(Router::with_path("api/v1/inference/trades").get(inference::get_inference_trades))
+        .push(Router::with_path("api/v1/inference/stats").get(inference::get_inference_stats));
 
     OpenApi::new("Dodex REST API", env!("CARGO_PKG_VERSION"))
         .info(

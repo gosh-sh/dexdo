@@ -16,6 +16,10 @@ use dodex_application::InferenceOrderFlag;
 use dodex_domain::DomainError;
 use dodex_domain::InferenceMarket;
 use dodex_domain::InferenceMarketStatus;
+use dodex_domain::InferenceStatsDay;
+use dodex_domain::InferenceStatsPeriod;
+use dodex_domain::InferenceStatsPreviousPeriod;
+use dodex_domain::InferenceStatsTotals;
 use dodex_domain::LiquidityFilter;
 use dodex_domain::Trade;
 use salvo::prelude::*;
@@ -566,4 +570,149 @@ pub(crate) async fn get_inference_trades(
         .map_err(|err| map_domain_or_unexpected(err, "get_inference_trades"))?;
 
     Ok(Json(tape.into_iter().map(inference_trade_to_dto).collect()))
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct InferenceStatsResponse {
+    /// The requested period: `14d`, `30d` or `all`.
+    period: &'static str,
+    /// Unix milliseconds. The instant the `perDay`, `totals` and `previousPeriod` figures
+    /// were calculated for; they may be up to an hour old (four for `all`) on top of
+    /// indexing delay.
+    as_of: i64,
+    /// One entry per UTC calendar day, oldest first, ending today. Days without
+    /// executions are present with zeros; today is partial.
+    per_day: Vec<InferenceStatsDayDto>,
+    /// The sum of `perDay`.
+    totals: InferenceStatsTotalsDto,
+    /// The interval of equal length just before the period. `null` for `all`, and for
+    /// `14d` / `30d` whenever the service has a reason to doubt that interval.
+    previous_period: Option<InferenceStatsPreviousPeriodDto>,
+    /// Executions in the 24 hours before its own `asOf`; not a sum of days.
+    #[serde(rename = "volume24h")]
+    volume_24h: InferenceStatsVolume24hDto,
+}
+
+/// Executed volume of one UTC day.
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct InferenceStatsDayDto {
+    /// `YYYY-MM-DD`, UTC.
+    day: String,
+    /// Matched ticks, in the units of `/inference/trades` `qty`. Canonical decimal.
+    ticks: String,
+    /// Quote-asset notional, in the units of `/inference/trades` `quoteQty` (without the
+    /// buyer's fee). Canonical decimal.
+    quote: String,
+    /// Number of executions, as a decimal string.
+    fills: String,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct InferenceStatsTotalsDto {
+    ticks: String,
+    quote: String,
+    /// Number of executions, as a decimal string.
+    fills: String,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct InferenceStatsPreviousPeriodDto {
+    /// First UTC day of the interval, `YYYY-MM-DD`, inclusive.
+    from: String,
+    /// `YYYY-MM-DD`, exclusive: the first day of the selected period.
+    to: String,
+    totals: InferenceStatsTotalsDto,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct InferenceStatsVolume24hDto {
+    ticks: String,
+    quote: String,
+    /// Number of executions, as a decimal string.
+    fills: String,
+    /// Unix milliseconds. The window is `[asOf - 24 h, asOf)`.
+    as_of: i64,
+}
+
+impl From<InferenceStatsTotals> for InferenceStatsTotalsDto {
+    fn from(t: InferenceStatsTotals) -> Self {
+        Self { ticks: t.ticks, quote: t.quote, fills: t.fills.to_string() }
+    }
+}
+
+impl From<InferenceStatsDay> for InferenceStatsDayDto {
+    fn from(d: InferenceStatsDay) -> Self {
+        Self {
+            day: d.day,
+            ticks: d.totals.ticks,
+            quote: d.totals.quote,
+            fills: d.totals.fills.to_string(),
+        }
+    }
+}
+
+impl From<InferenceStatsPreviousPeriod> for InferenceStatsPreviousPeriodDto {
+    fn from(p: InferenceStatsPreviousPeriod) -> Self {
+        Self { from: p.from, to: p.to, totals: p.totals.into() }
+    }
+}
+
+/// Network-wide trading statistics over all inference books. A blank `period` is -1102; an unknown or repeated one is -1130.
+#[endpoint(
+    tags("inference-market-data"),
+    summary = "Inference trading statistics",
+    parameters(
+        ("period" = Option<dto::InferenceStatsPeriod>, Query, description = "Window of the per-day series: 14d (default), 30d or all. Case-sensitive; sent more than once is rejected."),
+    ),
+    security(()),
+)]
+pub(crate) async fn get_inference_stats(
+    req: &mut Request,
+    depot: &mut Depot,
+) -> Result<Json<InferenceStatsResponse>, ApiError> {
+    let state = depot
+        .obtain::<AppState>()
+        .map_err(|err| {
+            error!(?err, "missing AppState in depot");
+            ApiError::from(DomainError::Unexpected)
+        })?
+        .clone();
+    let cache = state.inference_stats.clone().ok_or_else(|| {
+        error!("inference_stats not wired in AppState");
+        ApiError::from(DomainError::Unexpected)
+    })?;
+
+    // A repeated `period` would be truncated to its first value: reject it.
+    if req.queries().get_vec("period").is_some_and(|values| values.len() > 1) {
+        return Err(ApiError::from(DomainError::InvalidParameter));
+    }
+    let period = match non_blank_query(req, "period")? {
+        None => InferenceStatsPeriod::Days14,
+        Some(v) => InferenceStatsPeriod::parse(&v)
+            .ok_or_else(|| ApiError::from(DomainError::InvalidParameter))?,
+    };
+
+    let (history, volume) = tokio::join!(cache.history(period), cache.volume_24h());
+    let history = history.map_err(ApiError::from)?;
+    let volume = volume.map_err(ApiError::from)?;
+
+    // The blocks are shared with the cache and other requests, hence the clones.
+    Ok(Json(InferenceStatsResponse {
+        period: period.as_str(),
+        as_of: history.as_of_ms,
+        per_day: history.per_day.iter().cloned().map(Into::into).collect(),
+        totals: history.totals.clone().into(),
+        previous_period: history.previous_period.clone().map(Into::into),
+        volume_24h: InferenceStatsVolume24hDto {
+            ticks: volume.totals.ticks.clone(),
+            quote: volume.totals.quote.clone(),
+            fills: volume.totals.fills.to_string(),
+            as_of: volume.as_of_ms,
+        },
+    }))
 }

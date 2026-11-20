@@ -15,6 +15,9 @@ use dodex_domain::DepthSnapshot;
 use dodex_domain::DomainError;
 use dodex_domain::InferenceDepthSnapshot;
 use dodex_domain::InferenceMarketsPage;
+use dodex_domain::InferenceStatsHistory;
+use dodex_domain::InferenceStatsPeriod;
+use dodex_domain::InferenceStatsVolume24h;
 use dodex_domain::LiquidityFilter;
 use dodex_domain::MarketAddress;
 use dodex_domain::MarketStatus;
@@ -900,6 +903,23 @@ pub trait InferenceReadRepository: Send + Sync {
         orderbook_address: &str,
         limit: u16,
     ) -> Result<Vec<Trade>, anyhow::Error>;
+
+    /// Historical block of GET /api/v1/inference/stats at the given cutoff (Unix ms).
+    /// Out-of-range precision / undecodable aggregate → `MarketInconsistent`; a statement
+    /// cancelled at its time bound → `RequestTimeout`.
+    async fn inference_stats_history(
+        &self,
+        period: InferenceStatsPeriod,
+        as_of_ms: i64,
+    ) -> Result<InferenceStatsHistory, anyhow::Error>;
+
+    /// Rolling `[as_of - 24 h, as_of)` block. Out-of-range precision / undecodable
+    /// aggregate → `MarketInconsistent`; a statement cancelled at its time bound →
+    /// `RequestTimeout`.
+    async fn inference_stats_volume_24h(
+        &self,
+        as_of_ms: i64,
+    ) -> Result<InferenceStatsVolume24h, anyhow::Error>;
 }
 
 #[async_trait]
@@ -933,6 +953,21 @@ impl<T: ?Sized + InferenceReadRepository> InferenceReadRepository for Arc<T> {
         limit: u16,
     ) -> Result<Vec<Trade>, anyhow::Error> {
         (**self).list_inference_trades(orderbook_address, limit).await
+    }
+
+    async fn inference_stats_history(
+        &self,
+        period: InferenceStatsPeriod,
+        as_of_ms: i64,
+    ) -> Result<InferenceStatsHistory, anyhow::Error> {
+        (**self).inference_stats_history(period, as_of_ms).await
+    }
+
+    async fn inference_stats_volume_24h(
+        &self,
+        as_of_ms: i64,
+    ) -> Result<InferenceStatsVolume24h, anyhow::Error> {
+        (**self).inference_stats_volume_24h(as_of_ms).await
     }
 }
 
@@ -7353,6 +7388,9 @@ mod inference_usecase_tests {
     use async_trait::async_trait;
     use dodex_domain::InferenceDepthSnapshot;
     use dodex_domain::InferenceMarketsPage;
+    use dodex_domain::InferenceStatsHistory;
+    use dodex_domain::InferenceStatsPeriod;
+    use dodex_domain::InferenceStatsVolume24h;
 
     use super::DomainError;
     use super::GetInferenceDepthQuery;
@@ -7440,6 +7478,21 @@ mod inference_usecase_tests {
         ) -> Result<Vec<Trade>, anyhow::Error> {
             self.trades_calls.lock().unwrap().push((orderbook_address.to_string(), limit));
             Ok(self.trades_response.lock().unwrap().clone())
+        }
+
+        async fn inference_stats_history(
+            &self,
+            _period: InferenceStatsPeriod,
+            _as_of_ms: i64,
+        ) -> Result<InferenceStatsHistory, anyhow::Error> {
+            unimplemented!()
+        }
+
+        async fn inference_stats_volume_24h(
+            &self,
+            _as_of_ms: i64,
+        ) -> Result<InferenceStatsVolume24h, anyhow::Error> {
+            unimplemented!()
         }
     }
 

@@ -33,6 +33,7 @@
       - [Lapsed orders](#lapsed-orders)
       - [Order flags](#order-flags)
     - [Inference Trades](#inference-trades)
+    - [Inference Stats](#inference-stats)
   - [Account Endpoints](#account-endpoints)
     - [Register Account](#register-account)
     - [Account Balance](#account-balance)
@@ -230,6 +231,7 @@ envelope field failed or why a credential was rejected.
 | Fetch inference order book (depth) | `GET` | `/api/v1/inference/depth` | `NONE` |
 | List inference orders | `GET` | `/api/v1/inference/orders` | `NONE` |
 | Fetch recent inference trades | `GET` | `/api/v1/inference/trades` | `NONE` |
+| Fetch inference trading statistics | `GET` | `/api/v1/inference/stats` | `NONE` |
 | Register a trading account from a PrivateNote | `POST` | `/api/v1/accounts` | `NONE` |
 | Fetch account collateral balance | `GET` | `/api/v1/account` | `USER_DATA` |
 | Fetch outcome balances for one market | `GET` | `/api/v1/account/balances` | `USER_DATA` |
@@ -1200,6 +1202,92 @@ Errors:
 | `limit` present but not an integer | `-1130` | 400 |
 | `inferenceOrderBookAddress` not found, or its book has not been reconciled yet | `-1121` | 404 |
 | Trade data is temporarily inconsistent | `-1500` | 503 |
+
+### Inference Stats
+
+```http
+GET /api/v1/inference/stats
+```
+
+Security: `NONE`
+
+Fetch network-wide trading statistics: how much was executed on the inference order books, per UTC day and over the last 24 hours. The figures cover every book together and depend on no account and no filter, so one request answers a dashboard question ("payments, last 14 days") whatever the number of models or trades. No authentication is required.
+
+Query parameters:
+
+| Name | Type | Mandatory | Description |
+| --- | --- | --- | --- |
+| `period` | STRING | NO | Window of the `perDay` series: `14d` (default), `30d` or `all`. Case-sensitive. A blank value is `-1102`; any other value, or `period` sent more than once, is `-1130`. |
+
+Response:
+
+```json
+{
+  "period": "14d",
+  "asOf": 1792756800000,
+  "perDay": [
+    { "day": "2026-10-10", "ticks": "0", "quote": "0", "fills": "0" },
+    { "day": "2026-10-22", "ticks": "3", "quote": "24", "fills": "1" },
+    { "day": "2026-10-23", "ticks": "9", "quote": "108", "fills": "3" }
+  ],
+  "totals": { "ticks": "12", "quote": "132", "fills": "4" },
+  "previousPeriod": {
+    "from": "2026-09-26",
+    "to": "2026-10-10",
+    "totals": { "ticks": "5", "quote": "7.5", "fills": "2" }
+  },
+  "volume24h": { "ticks": "12", "quote": "132", "fills": "4", "asOf": 1792756860000 }
+}
+```
+
+(`perDay` is abbreviated here: a real `14d` response carries all fourteen days.)
+
+Fields:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `period` | STRING | The period served: `14d`, `30d` or `all`. |
+| `asOf` | LONG | Unix milliseconds. The cutoff `perDay`, `totals` and `previousPeriod` were calculated for: executions at or after it are not counted. |
+| `perDay` | ARRAY | One entry per UTC calendar day, oldest first, ending with the current day. Entry fields are `day` (`YYYY-MM-DD`), `ticks`, `quote` and `fills`. |
+| `totals` | OBJECT | `ticks`, `quote` and `fills` over the whole period. Always equal to the sum of `perDay`. |
+| `previousPeriod` | OBJECT \| null | The interval of equal length just before the period: `from` (inclusive) and `to` (exclusive) as `YYYY-MM-DD`, and its `totals`. The key is always present; `null` when no comparison is offered (see below). |
+| `volume24h` | OBJECT | `ticks`, `quote` and `fills` for the 24 hours `[asOf − 24 h, asOf)`, and its own `asOf` (Unix milliseconds). |
+
+Units:
+
+- `ticks` is in the units of `qty` on [`/api/v1/inference/trades`](#inference-trades); `quote` is in the units of `quoteQty` there — the SHELL notional `price × qty`, **without** the buyer's fee.
+- Both are canonical decimal strings: no padding, so a zero is `"0"` and `108` SHELL is `"108"`. This differs from `/trades`, which pads to the full scale. Compare numerically, not as text.
+- `fills` counts executions (one per `InferenceFilled` match) and is a decimal integer string, like the other chain-sized numbers in this API.
+
+Period semantics:
+
+- Days are UTC calendar days. The current day is partial: it counts executions up to `asOf`. A day with no executions is present with zeros, including days after the latest execution.
+- `14d` is the current day and the 13 before it; `30d` is the current day and the 29 before it. `all` runs from the day of the first execution on the tape to the current day, and is `perDay: []` with zero `totals` when there is no execution at all.
+- `previousPeriod` for `14d` is the 14 days before those; for `30d`, the 30 days before.
+- `volume24h` is a rolling window with its own `asOf`, not a sum of days: it can be taken at a different instant than the daily block.
+
+What counts as an execution: every row of the trade tape with a known execution time as of `asOf`, from every book — including books that currently hold no liquidity or were superseded, so history does not shrink when a book is retired. The statistics are as complete as the tape: nothing is guaranteed about history the indexer has not ingested, and a fill the indexer cannot attribute to a direction is absent from [`/api/v1/inference/trades`](#inference-trades) and from these figures alike.
+
+`previousPeriod`:
+
+- It is `null` for `period=all`.
+- For `14d` and `30d` it is an object only when all of the following hold, and `null` otherwise: the tape holds an execution before the previous interval; the tape holds an execution inside the selected period; and no event that could be an execution inside the previous interval is still waiting to be applied by the indexer.
+- This is a heuristic that withholds the comparison when the service has a reason to doubt it. It is **not a guarantee** that the previous interval is complete: an event the chain gateway never delivered leaves no trace to check, so a returned `previousPeriod` can still understate history.
+- The cost of the heuristic: a selected period with no executions gives `null` even when history is complete; a network whose first execution falls inside the previous interval gives `null`, because the first execution says nothing about older history; and a stuck event under an inference book withholds the comparison, with a delay, for at most the period's length — 14 days for `14d`, 30 for `30d` — or until it is repaired, whichever comes first. Only the previous interval is checked, and it moves forward one day per day: an event dated on day D has no effect for the first 14 (or 30) days, while D is inside the selected period; keeps `previousPeriod` `null` for the next 14 (or 30) days, while D is inside the previous interval; and has no effect once D is older than the previous interval. A previous interval that passes the checks and has no executions is an object with zero totals.
+
+Freshness: responses are cached by the service, so each part may be older than the request that returned it, on top of the indexing delay. A part is served for at most a fixed time after its calculation finished — 10 minutes for `volume24h`, 1 hour for `14d` and `30d`, 4 hours for `all` — and its `asOf` is taken when the calculation starts, so a part can be older than that time by how long its calculation took. The `perDay` block is recalculated as soon as the UTC date changes, whatever its age. `asOf` and `volume24h.asOf` say exactly how old each part is; they differ.
+
+Errors:
+
+| Condition | Code | HTTP |
+| --- | --- | --- |
+| `period` blank | `-1102` | 400 |
+| `period` not `14d`, `30d` or `all`, or sent more than once | `-1130` | 400 |
+| Stored data is temporarily inconsistent | `-1500` | 503 |
+| The calculation did not finish within its time limit (about 30 seconds); the request can be retried | `-1007` | 504 |
+| Unexpected (database failure, etc.) | `-1000` | 500 |
+
+A failed calculation is never answered with partial data, and a failure is not remembered: the next request calculates again.
 
 ## Account Endpoints
 
