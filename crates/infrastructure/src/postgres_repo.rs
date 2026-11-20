@@ -2011,7 +2011,7 @@ fn order_from_row(row: OrderRow) -> Option<Order> {
 /// `"0".repeat(...)`, so an unbounded value on a corrupt row would OOM the
 /// API process on the first page that touches it. Neither column carries a
 /// `CHECK` in 0001_initial.sql; this is the read-side defence.
-const MAX_DECIMAL_PRECISION: u32 = 38;
+pub(crate) const MAX_DECIMAL_PRECISION: u32 = 38;
 
 /// Reason a decimal-scale value (`(price|quantity)_precision` or
 /// `ref_tokens.decimals`) is unusable. Distinguishes the two corruption

@@ -175,6 +175,51 @@ pub async fn setup_with_pn_reader(
     Some((service, pool, kek))
 }
 
+/// `setup()` with the inference repository replaced and the stats cache's clock pinned —
+/// for endpoints whose HTTP contract is tested against canned data. Same wiring as
+/// `setup_with_pn_reader`, plus `.with_inference_repo(repo).with_inference_stats_clock(clock)`.
+pub async fn setup_with_inference_repo(
+    inference_repo: dodex_api::testkit::SharedInferenceRepo,
+    stats_clock: dodex_api::testkit::ClockMs,
+) -> Option<(Service, PgPool)> {
+    let _ = dotenvy::dotenv();
+    let url = env::var("TEST_DATABASE_URL").ok().filter(|s| !s.is_empty())?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect(&url)
+        .await
+        .expect("connect to TEST_DATABASE_URL");
+    database::run_migrations(&pool).await.expect("run migrations");
+
+    let kek = test_kek();
+    seed::seed_accounts_from_notes(&pool, &kek, std::path::Path::new(SEED_NOTES_FIXTURE))
+        .await
+        .expect("seed credentials");
+
+    let repo: SharedRepo = Arc::new(PostgresReadModelRepository::new(pool.clone()));
+    let auth_config = AuthSection {
+        kek_hex: "ab".repeat(32),
+        default_recv_window_ms: 5_000,
+        max_recv_window_ms: 60_000,
+        seed_accounts: false,
+        seed_accounts_path: None,
+    };
+    let authenticator: SharedAuth =
+        Arc::new(PostgresAuthenticator::new(pool.clone(), kek.clone(), &auth_config));
+    let chain_sender: SharedChainSender = Arc::new(NoopChainSender);
+    let pn_reader: dodex_api::testkit::SharedPnReader = Arc::new(FakePnStateReader::default());
+    let ref_repo: dodex_api::testkit::SharedRefRepo = Arc::new(FakeReferenceRepo::with_seeded());
+    let registry: dodex_api::testkit::SharedRegistry =
+        Arc::new(PostgresAccountRegistry::new(pool.clone(), kek));
+    let state = AppState::new(repo, authenticator, chain_sender, pn_reader, ref_repo)
+        .with_account_registry(registry)
+        .with_inference_repo(inference_repo)
+        .with_inference_stats_clock(stats_clock);
+    let service = Service::new(build_router(state));
+    Some((service, pool))
+}
+
 /// `ChainOrderSender` fake that succeeds on every call. The auth-layer
 /// tests under this module never reach the sender (no markets seeded,
 /// so the use case 404s first), but `AppState` needs *some* concrete
