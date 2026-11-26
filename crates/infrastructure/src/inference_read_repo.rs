@@ -22,6 +22,9 @@ use dodex_domain::InferenceDepthSnapshot;
 use dodex_domain::InferenceMarket;
 use dodex_domain::InferenceMarketStatus;
 use dodex_domain::InferenceMarketsPage;
+use dodex_domain::InferenceStatsHistory;
+use dodex_domain::InferenceStatsPeriod;
+use dodex_domain::InferenceStatsVolume24h;
 use dodex_domain::LiquidityFilter;
 use dodex_domain::PriceLevel;
 use dodex_domain::Trade;
@@ -33,6 +36,7 @@ use tracing::warn;
 
 use crate::config::CAPTURE_FRESHNESS_SECS;
 use crate::indexer_repo::CAPTURE_STREAM;
+use crate::inference_stats::STATS_STATEMENT_TIMEOUT;
 use crate::postgres_repo::decode_cursor;
 use crate::postgres_repo::encode_cursor;
 use crate::postgres_repo::scale_uint_to_decimal;
@@ -283,6 +287,21 @@ impl InferenceReadRepository for PostgresReadModelRepository {
         limit: u16,
     ) -> Result<Vec<Trade>, anyhow::Error> {
         list_inference_trades_impl(self, orderbook_address, limit).await
+    }
+
+    async fn inference_stats_history(
+        &self,
+        period: InferenceStatsPeriod,
+        as_of_ms: i64,
+    ) -> Result<InferenceStatsHistory, anyhow::Error> {
+        self.stats_history(period, as_of_ms, None, STATS_STATEMENT_TIMEOUT).await
+    }
+
+    async fn inference_stats_volume_24h(
+        &self,
+        as_of_ms: i64,
+    ) -> Result<InferenceStatsVolume24h, anyhow::Error> {
+        self.stats_volume_24h(as_of_ms, None).await
     }
 }
 

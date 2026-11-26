@@ -648,7 +648,7 @@ async fn sweep_wraps_against_fixed_boundary_not_live_next_order_id() {
     let g2 = RecGetter::new(0, 11, &[]);
     let _ = r_run(&pool, g2.clone(), ob).await;
     assert!(
-        g2.order_ids().contains(&"10".to_string()),
+        g2.order_ids().iter().any(|x| x == "10"),
         "id=10 re-probed in the next cycle (low ids also re-scanned)"
     );
 }
@@ -1050,10 +1050,10 @@ async fn refresh_selects_price_due_sweep_due_and_skips_fresh() {
     // `reference_price_at nulls first` LIMIT window and evict our candidates.
     let scope = vec![a.to_string(), b.to_string(), c.to_string(), d.to_string()];
     let picked = r.select_refresh_candidates_within(&scope).await.unwrap();
-    assert!(picked.contains(&a.to_string()), "price-due must be selected");
-    assert!(picked.contains(&b.to_string()), "sweep-due must be selected");
-    assert!(picked.contains(&c.to_string()), "never-swept (last_swept_at NULL) must be selected");
-    assert!(!picked.contains(&d.to_string()), "fresh book must NOT be selected");
+    assert!(picked.iter().any(|x| x == a), "price-due must be selected");
+    assert!(picked.iter().any(|x| x == b), "sweep-due must be selected");
+    assert!(picked.iter().any(|x| x == c), "never-swept (last_swept_at NULL) must be selected");
+    assert!(!picked.iter().any(|x| x == d), "fresh book must NOT be selected");
 }
 
 // The reconciler bumps a write-handle; metrics-refresh reads the count getter.
@@ -1132,7 +1132,7 @@ async fn failure_stamps_backoff_and_excludes_from_reselection() {
     let scope = vec![ob.to_string()];
     // Confirm selected before any failure.
     let before = r.select_refresh_candidates_within(&scope).await.unwrap();
-    assert!(before.contains(&ob.to_string()), "price-due book must be selected before failure");
+    assert!(before.iter().any(|x| x == ob), "price-due book must be selected before failure");
 
     // Stamp a failure.
     r.stamp_failure(ob).await.unwrap();
@@ -1140,7 +1140,7 @@ async fn failure_stamps_backoff_and_excludes_from_reselection() {
     // Within backoff window ⇒ must be excluded.
     let after = r.select_refresh_candidates_within(&scope).await.unwrap();
     assert!(
-        !after.contains(&ob.to_string()),
+        !after.iter().any(|x| x == ob),
         "within 5-min backoff ⇒ must be excluded from selection"
     );
 
@@ -1164,7 +1164,7 @@ async fn failure_stamps_backoff_and_excludes_from_reselection() {
     // Must be selectable again.
     let after_expiry = r.select_refresh_candidates_within(&scope).await.unwrap();
     assert!(
-        after_expiry.contains(&ob.to_string()),
+        after_expiry.iter().any(|x| x == ob),
         "after backoff window expires ⇒ must be selectable again"
     );
 }

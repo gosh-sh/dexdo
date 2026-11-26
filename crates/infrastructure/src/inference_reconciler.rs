@@ -36,9 +36,9 @@ const FAILURE_BACKOFF_INTERVAL_SQL: &str = "5 minutes";
 const ERR_NO_LIQUIDITY: i32 = 334;
 const EVENTS_STREAM_NAME: &str = "blockchain_events";
 const KIND: &str = "InferenceOrderBook";
-const QUOTE_TOKEN_TYPE_SHELL: i32 = 2;
+pub(crate) const QUOTE_TOKEN_TYPE_SHELL: i32 = 2;
 const PRICE_PRECISION: i32 = 9;
-const QUANTITY_PRECISION: i32 = 0;
+pub(crate) const QUANTITY_PRECISION: i32 = 0;
 // Advertised trading rules. The chain enforces none of them: InferenceOrderBook
 // takes `price` as a free `uint256` of ECC[SHELL] base units per tick and `ticks`
 // as a `uint128`, with no tick-multiple or notional check, and the API exposes no

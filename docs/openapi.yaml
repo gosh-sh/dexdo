@@ -377,6 +377,36 @@ paths:
                 $ref: '#/components/schemas/ErrorBody'
       security:
       - {}
+  /api/v1/inference/stats:
+    get:
+      tags:
+      - inference-market-data
+      summary: Inference trading statistics
+      operationId: get_inference_stats
+      parameters:
+      - name: period
+        in: query
+        description: 'Window of the per-day series: 14d (default), 30d or all. Case-sensitive; sent more than once is rejected.'
+        required: false
+        schema:
+          allOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/InferenceStatsPeriod'
+      responses:
+        '200':
+          description: Response with json format data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InferenceStatsResponse'
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+      security:
+      - {}
   /api/v1/inference/trades:
     get:
       tags:
@@ -1709,6 +1739,118 @@ components:
         serverTime:
           type: integer
           format: int64
+    InferenceStatsDayDto:
+      type: object
+      description: Executed volume of one UTC day.
+      required:
+      - day
+      - ticks
+      - quote
+      - fills
+      properties:
+        day:
+          type: string
+          description: '`YYYY-MM-DD`, UTC.'
+        fills:
+          type: string
+          description: Number of executions, as a decimal string.
+        quote:
+          type: string
+          description: |-
+            Quote-asset notional, in the units of `/inference/trades` `quoteQty` (without the
+            buyer's fee). Canonical decimal.
+        ticks:
+          type: string
+          description: Matched ticks, in the units of `/inference/trades` `qty`. Canonical decimal.
+    InferenceStatsPeriod:
+      type: string
+      description: Values accepted by the `GET /api/v1/inference/stats` `period` parameter.
+      enum:
+      - 14d
+      - 30d
+      - all
+    InferenceStatsPreviousPeriodDto:
+      type: object
+      required:
+      - from
+      - to
+      - totals
+      properties:
+        from:
+          type: string
+          description: First UTC day of the interval, `YYYY-MM-DD`, inclusive.
+        to:
+          type: string
+          description: '`YYYY-MM-DD`, exclusive: the first day of the selected period.'
+        totals:
+          $ref: '#/components/schemas/InferenceStatsTotalsDto'
+    InferenceStatsResponse:
+      type: object
+      required:
+      - period
+      - asOf
+      - perDay
+      - totals
+      - volume24h
+      properties:
+        asOf:
+          type: integer
+          format: int64
+          description: |-
+            Unix milliseconds. The instant the `perDay`, `totals` and `previousPeriod` figures
+            were calculated for; they may be up to an hour old (four for `all`) on top of
+            indexing delay.
+        perDay:
+          type: array
+          items:
+            $ref: '#/components/schemas/InferenceStatsDayDto'
+          description: |-
+            One entry per UTC calendar day, oldest first, ending today. Days without
+            executions are present with zeros; today is partial.
+        period:
+          type: string
+          description: 'The requested period: `14d`, `30d` or `all`.'
+        previousPeriod:
+          allOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/InferenceStatsPreviousPeriodDto'
+        totals:
+          $ref: '#/components/schemas/InferenceStatsTotalsDto'
+        volume24h:
+          $ref: '#/components/schemas/InferenceStatsVolume24hDto'
+    InferenceStatsTotalsDto:
+      type: object
+      required:
+      - ticks
+      - quote
+      - fills
+      properties:
+        fills:
+          type: string
+          description: Number of executions, as a decimal string.
+        quote:
+          type: string
+        ticks:
+          type: string
+    InferenceStatsVolume24hDto:
+      type: object
+      required:
+      - ticks
+      - quote
+      - fills
+      - asOf
+      properties:
+        asOf:
+          type: integer
+          format: int64
+          description: Unix milliseconds. The window is `[asOf - 24 h, asOf)`.
+        fills:
+          type: string
+          description: Number of executions, as a decimal string.
+        quote:
+          type: string
+        ticks:
+          type: string
     InferenceTradeDto:
       type: object
       description: |-
